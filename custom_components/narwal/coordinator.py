@@ -14,8 +14,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from .const import (
     CONF_ACCESS_TOKEN,
     CONF_AREA_CODE,
+    CONF_DEVICE_ALIAS,
     CONF_DEVICE_NAME,
     CONF_EMAIL,
+    CONF_MODEL,
     CONF_MQTT_CLIENT_ID,
     CONF_MQTT_PASSWORD,
     CONF_MQTT_USERNAME,
@@ -111,6 +113,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         if self._cloud:
             await self._reauth()
+            await self._backfill_device_info()
 
         self.client.on_state_update = self._on_state_update
         await self.client.connect()
@@ -204,6 +207,24 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self._apply_new_token(session.access_token, session.refresh_token)
         except NarwalCloudError as err:
             _LOGGER.error("Re-login failed: %s", err)
+
+    async def _backfill_device_info(self) -> None:
+        """Fill model/alias into entry data for entries added before these keys existed."""
+        data = self.config_entry.data
+        if data.get(CONF_MODEL):
+            return
+        try:
+            devices = await self.hass.async_add_executor_job(self._cloud.get_devices)
+        except NarwalCloudError as err:
+            _LOGGER.debug("Device list backfill failed: %s", err)
+            return
+        for d in devices:
+            if d.device_name == data.get(CONF_DEVICE_NAME):
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={**data, CONF_MODEL: d.model, CONF_DEVICE_ALIAS: d.name},
+                )
+                return
 
     def _apply_new_token(self, access_token: str, refresh_token: str) -> None:
         self.hass.config_entries.async_update_entry(

@@ -9,7 +9,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN
+from .const import CONF_DEVICE_ALIAS, CONF_MODEL, DOMAIN
 from .coordinator import NarwalCoordinator
 from .narwal_client import NarwalCommandError, NarwalConnectionError, NarwalState
 
@@ -25,11 +25,13 @@ class NarwalEntity(CoordinatorEntity[NarwalCoordinator]):
         self._device_name = data["device_name"]
         if key:
             self._attr_unique_id = f"{self._device_name}_{key}"
+        model = data.get(CONF_MODEL) or ""
+        name = data.get(CONF_DEVICE_ALIAS) or model or f"Narwal {data['product_key']}"
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, data["device_name"])},
-            name=f"Narwal {data['product_key']}",
+            name=name,
             manufacturer="Narwal",
-            model="Freo X Ultra",
+            model=model or "Narwal",
             sw_version=coordinator.client.state.firmware_version or None,
         )
 
