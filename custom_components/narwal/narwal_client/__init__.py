@@ -1,25 +1,25 @@
-"""Narwal robot vacuum client library — local WebSocket API."""
+"""Narwal MQTT client library."""
 
 from .client import NarwalClient, NarwalCommandError, NarwalConnectionError
-from .const import CleanMode, CommandResult, FanLevel, MopHumidity, WorkingStatus
-from .models import CommandResponse, DeviceInfo, MapData, MapDisplayData, NarwalState, RoomInfo
-from .protocol import build_frame, parse_frame
+from .cloud import NarwalAuthError, NarwalCloud, NarwalCloudError, NarwalCloudSession, NarwalDevice
+from .const import CleanMode, FanLevel, MopHumidity
+from .models import CommandResponse, MapSnapshot, NarwalState, Pose, RoomInfo
 
 __all__ = [
-    "NarwalClient",
-    "NarwalCommandError",
-    "NarwalConnectionError",
-    "NarwalState",
     "CleanMode",
     "CommandResponse",
-    "CommandResult",
-    "DeviceInfo",
     "FanLevel",
-    "MapData",
-    "MapDisplayData",
+    "MapSnapshot",
     "MopHumidity",
+    "NarwalAuthError",
+    "NarwalClient",
+    "NarwalCloud",
+    "NarwalCloudError",
+    "NarwalCloudSession",
+    "NarwalCommandError",
+    "NarwalConnectionError",
+    "NarwalDevice",
+    "NarwalState",
+    "Pose",
     "RoomInfo",
-    "WorkingStatus",
-    "build_frame",
-    "parse_frame",
 ]

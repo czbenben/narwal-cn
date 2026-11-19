@@ -1,103 +1,109 @@
-"""WebSocket client for Narwal robot vacuum."""
+"""MQTT client for Narwal robot vacuum cloud communication."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import random
+import ssl
+import threading
 import time
+import uuid
 from collections.abc import Callable
 from typing import Any
 
-import websockets
-import websockets.exceptions
+import paho.mqtt.client as mqtt
+from paho.mqtt.packettypes import PacketTypes
+from paho.mqtt.properties import Properties
 
 from .const import (
-    AWAKE_BROADCAST_MAX_AGE,
-    BROADCAST_STALE_TIMEOUT,
-    CLEAN_MODE_TO_TASK_TYPE,
-    CLEAN_MODE_TO_V2,
-    COMMAND_RECONNECT_WAIT,
+    ASLEEP_AFTER_SECONDS,
+    BROADCAST_TOPICS,
+    CLEAN_MODE_LABEL,
+    CLEAN_MODE_TASK_TYPE,
     COMMAND_RESPONSE_TIMEOUT,
-    COMMAND_RETRY_WAKE_TIMEOUT,
-    DEFAULT_PORT,
-    DEFAULT_TOPIC_PREFIX,
-    HEARTBEAT_INTERVAL,
-    IDEMPOTENT_COMMANDS,
-    KEEPALIVE_INTERVAL,
-    KNOWN_PRODUCT_KEYS,
-    RECONNECT_BACKOFF_FACTOR,
-    RECONNECT_INITIAL_DELAY,
-    RECONNECT_MAX_DELAY,
+    MQTT_BROKER,
+    MQTT_PORT,
+    SERVICE_RESULT_MESSAGES,
     TOPIC_CMD_ACTIVE_ROBOT,
-    TOPIC_CMD_APP_HEARTBEAT,
-    TOPIC_CMD_CANCEL,
+    TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_DRY_MOP,
     TOPIC_CMD_DUST_GATHERING,
-    TOPIC_CMD_EASY_CLEAN,
     TOPIC_CMD_FORCE_END,
-    TOPIC_CMD_GET_ALL_MAPS,
     TOPIC_CMD_GET_BASE_STATUS,
-    TOPIC_CMD_GET_CURRENT_TASK,
+    TOPIC_CMD_GET_CONFIG,
+    TOPIC_CMD_GET_CONSUMABLE,
     TOPIC_CMD_GET_DEVICE_INFO,
     TOPIC_CMD_GET_FEATURE_LIST,
+    TOPIC_CMD_GET_FIRMWARE_VERSION,
     TOPIC_CMD_GET_MAP,
-    TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PAUSE,
     TOPIC_CMD_RECALL,
+    TOPIC_CMD_RESET_CONSUMABLE,
     TOPIC_CMD_RESUME,
+    TOPIC_CMD_SET_CONFIG,
     TOPIC_CMD_SET_FAN_LEVEL,
-    TOPIC_CMD_SET_LED,
     TOPIC_CMD_SET_MOP_HUMIDITY,
     TOPIC_CMD_START_CLEAN,
-    TOPIC_CMD_START_CLEAN_LEGACY,
-    TOPIC_CMD_TAKE_PICTURE,
+    TOPIC_CMD_WASH_AND_DRY_MOP,
     TOPIC_CMD_WASH_MOP,
     TOPIC_CMD_YELL,
-    WAKE_TIMEOUT,
-    WS_PING_INTERVAL,
-    WS_PING_TIMEOUT,
+    TOPIC_DISPLAY_MAP,
+    TOPIC_ROBOT_BASE_STATUS,
+    TOPIC_UPGRADE_STATUS,
+    TOPIC_WORKING_STATUS,
+    WAKE_TIMEOUTS,
     CleanMode,
-    CommandResult,
     FanLevel,
     MopHumidity,
 )
-from .models import (
-    CommandResponse,
-    DeviceInfo,
-    MapData,
-    MapDisplayData,
-    NarwalState,
-    PlannedTrajectory,
-)
-from .protobuf_decoder import ProtobufDecodeError
-from .protobuf_decoder import decode as decode_protobuf
-from .protocol import (
-    PROTOBUF_FIELD5_TAG,
-    NarwalMessage,
-    ProtocolError,
-    build_frame,
-    parse_frame,
-)
+from .models import CommandResponse, MapSnapshot, NarwalState, Pose, strip_narwal_frame
+from .proto import ProtoError, decode, encode, encode_varint
 
 _LOGGER = logging.getLogger(__name__)
 
-# Broadcast topics that are never deduplicated. Their handlers stamp an
-# arrival time (`received_at`, `_last_display_map_time`) that downstream
-# freshness checks rely on, so every frame has to go through even when the
-# bytes repeat. In practice neither topic repeats anyway — both carry a
-# monotonically growing timestamp inside the payload.
-DEDUP_EXEMPT_TOPICS = frozenset(
-    {
-        "map/display_map",
-        "status/point_navi_plan_traj",
-    }
+# Narwal's broker never PUBACKs our QoS 1 publishes (seen live: every message,
+# answered or not, stays in paho's in-flight queue). After paho's in-flight
+# limit (20) the client silently stops sending, so commands and keepalives
+# never leave and HA goes deaf 10-20 minutes after connecting. Publish at QoS
+# 0; the robot answers just the same and our reply timeouts cover losses.
+PUBLISH_QOS = 0
+
+# Response message type for each command we decode.
+RESPONSE_TYPES: dict[str, str] = {
+    TOPIC_CMD_ACTIVE_ROBOT: "ActiveRobotPublish_Response",
+    TOPIC_CMD_NOTIFY_APP_EVENT: "NotifyAppEvent_Response",
+    TOPIC_CMD_GET_BASE_STATUS: "GetDeviceBaseStatus_Response",
+    TOPIC_CMD_GET_CONFIG: "GetConfig_Response",
+    TOPIC_CMD_SET_CONFIG: "SetConfig_Response",
+    TOPIC_CMD_GET_CONSUMABLE: "GetConsumableInfo_Response",
+    TOPIC_CMD_GET_FEATURE_LIST: "GetFeatureList_Response",
+    TOPIC_CMD_GET_FIRMWARE_VERSION: "GetFirmwareVersion_Response",
+    TOPIC_CMD_GET_MAP: "GetMap_Response",
+    TOPIC_CMD_SET_FAN_LEVEL: "SetFanLevel_Response",
+    TOPIC_CMD_SET_MOP_HUMIDITY: "SetMopHumidity_Response",
+    TOPIC_CMD_START_CLEAN: "StartClean_Response",
+}
+# Commands whose response just carries a ServiceResult in field 1.
+_GENERIC_RESULT = "SetFanLevel_Response"
+
+# Response topics subscribed on connect. Narwal's broker only routes to
+# explicit subscriptions, so pre-subscribing saves a SUBACK round trip per
+# command (previously a fixed 0.5 s sleep on every call).
+_PRESUBSCRIBE = (
+    TOPIC_CMD_ACTIVE_ROBOT, TOPIC_CMD_NOTIFY_APP_EVENT,
+    TOPIC_CMD_GET_BASE_STATUS, TOPIC_CMD_GET_CONFIG, TOPIC_CMD_SET_CONFIG,
+    TOPIC_CMD_GET_CONSUMABLE, TOPIC_CMD_GET_MAP, TOPIC_CMD_YELL, TOPIC_CMD_PAUSE,
+    TOPIC_CMD_RESUME, TOPIC_CMD_FORCE_END, TOPIC_CMD_RECALL, TOPIC_CMD_START_CLEAN,
+    TOPIC_CMD_SET_FAN_LEVEL, TOPIC_CMD_SET_MOP_HUMIDITY, TOPIC_CMD_WASH_MOP,
+    TOPIC_CMD_DRY_MOP, TOPIC_CMD_WASH_AND_DRY_MOP, TOPIC_CMD_DUST_GATHERING,
 )
 
-# Upper bound on the per-topic payload cache used for deduplication. The
-# robot broadcasts fewer than 10 distinct topics, so this only guards
-# against an unexpected topic flood growing the cache without bound.
-DEDUP_CACHE_MAX_TOPICS = 32
+_PUSH_TYPES = {
+    TOPIC_ROBOT_BASE_STATUS: "RobotBaseStatus",
+    TOPIC_WORKING_STATUS: "WorkingStatus",
+    TOPIC_DISPLAY_MAP: "DisplayMap",
+    TOPIC_UPGRADE_STATUS: "OTAUpgradeStatus",
+}
 
 
 class NarwalConnectionError(Exception):
@@ -105,1910 +111,775 @@ class NarwalConnectionError(Exception):
 
 
 class NarwalCommandError(Exception):
-    """Raised when a command fails or times out."""
+    """Raised when a command fails, is rejected, or times out."""
 
-
-class NarwalTransportError(NarwalConnectionError):
-    """Raised when the WebSocket dies around a command.
-
-    ``frame_sent`` is False when the frame provably never left the socket. In
-    that case re-sending cannot duplicate anything, so even a command that is
-    unsafe to repeat can be retried.
-    """
-
-    def __init__(self, message: str, *, frame_sent: bool) -> None:
-        """Store whether the command frame made it onto the wire."""
+    def __init__(self, message: str, *, timeout: bool = False, result: Any = None) -> None:
         super().__init__(message)
-        self.frame_sent = frame_sent
+        self.timeout = timeout
+        self.result = result
+
+
+def _pb_string(field_num: int, value: str | bytes) -> bytes:
+    data = value.encode() if isinstance(value, str) else value
+    return encode_varint((field_num << 3) | 2) + encode_varint(len(data)) + data
+
+
+def _pb_varint(field_num: int, value: int) -> bytes:
+    return encode_varint(field_num << 3) + encode_varint(value)
 
 
 class NarwalClient:
-    """Async WebSocket client for communicating with a Narwal vacuum.
-
-    Usage:
-        client = NarwalClient(host="192.168.1.100", device_id="your_device_id")
-        await client.connect()
-        client.on_state_update = my_callback
-        await client.start_listening()
-        # ...later...
-        await client.disconnect()
-    """
+    """MQTT client for Narwal vacuum cloud communication."""
 
     def __init__(
         self,
-        host: str,
-        port: int = DEFAULT_PORT,
-        device_id: str = "",
-        topic_prefix: str | None = None,
+        product_key: str,
+        device_name: str,
+        user_uuid: str,
+        mqtt_username: str,
+        mqtt_password: str,
+        mqtt_client_id: str | None = None,
+        broker: str = MQTT_BROKER,
+        port: int = MQTT_PORT,
     ) -> None:
-        self.host = host
+        self.product_key = product_key
+        self.device_name = device_name
+        self.user_uuid = user_uuid
+        self.broker = broker
         self.port = port
-        self.device_id = device_id
-        self.url = f"ws://{host}:{port}"
-        self.topic_prefix = topic_prefix or DEFAULT_TOPIC_PREFIX
+
         self.state = NarwalState()
         self.on_state_update: Callable[[NarwalState], None] | None = None
-        self.on_message: Callable[[NarwalMessage], None] | None = None
 
-        self._ws: Any = None
-        self._listen_task: asyncio.Task[None] | None = None
-        self._heartbeat_task: asyncio.Task[None] | None = None
-        self._keepalive_task: asyncio.Task[None] | None = None
-        self._connected = asyncio.Event()
-        self._should_reconnect = True
-        self._listener_active = False  # True when start_listening() is running recv loop
-        self._robot_awake = False  # True once we receive a broadcast
-        self._last_broadcast_time: float = 0.0  # monotonic time of last broadcast
-        self._last_display_map_time: float = 0.0  # monotonic time of last display_map
-        # Last raw payload seen per broadcast topic — repeats are dropped
-        # before the expensive decode + entity fan-out (see _is_duplicate_broadcast)
-        self._last_payloads: dict[str, bytes] = {}
-        # Queue for field5 command responses
-        self._response_queue: asyncio.Queue[NarwalMessage] = asyncio.Queue()
-        # Lock to prevent concurrent send_command calls from racing on the queue
-        self._command_lock = asyncio.Lock()
-        # How often _decode_protobuf had to fall back to blackboxprotobuf
-        self._decode_fallbacks = 0
+        self._mqtt_username = mqtt_username
+        self._mqtt_password = mqtt_password
+        self._mqtt_client_id_prefix = mqtt_client_id or f"app_{user_uuid}"
+        self._mqtt_client_id = f"{self._mqtt_client_id_prefix}_{uuid.uuid4()}"
 
-    def _full_topic(self, short_topic: str) -> str:
-        """Build the full topic path."""
-        return f"{self.topic_prefix}/{self.device_id}/{short_topic}"
+        self._client: mqtt.Client | None = None
+        self._connected = threading.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+        # Pending requests keyed by the CorrelationData we sent; the robot echoes
+        # it in the reply. Every client on the account receives every reply, so
+        # matching by topic alone could hand us another client's answer.
+        self._pending_responses: dict[bytes, tuple[threading.Event, list[bytes | None]]] = {}
+        self._pending_by_topic: dict[str, bytes] = {}  # fallback for replies without one
+        self._pending_subacks: dict[int, threading.Event] = {}
+        self._sub_topics: dict[int, str] = {}  # SUBSCRIBE mid -> topic
+        self._subscribed: set[str] = set()
+        self._reset_lock: asyncio.Lock | None = None
+        self.last_push_time: float = 0.0
+        self.last_reset_time: float = 0.0
+        self._sub_lock = threading.Lock()
+        self._command_locks: dict[str, threading.Lock] = {}
+        self._wake_lock: asyncio.Lock | None = None
+        self.last_message_time: float = 0.0
+        self.last_wake_time: float = 0.0
+        self.needs_reconnect = False
+
+    @property
+    def base_topic(self) -> str:
+        return f"/{self.product_key}/{self.device_name}"
 
     @property
     def connected(self) -> bool:
-        """Return True if the WebSocket is currently connected."""
-        return self._ws is not None and self._connected.is_set()
+        return self._connected.is_set()
 
-    @property
-    def robot_awake(self) -> bool:
-        """Return True if the robot is actively broadcasting."""
-        return self._robot_awake
+    # ------------------------------------------------------------------
+    # Framing
+    # ------------------------------------------------------------------
 
-    @property
-    def last_broadcast_age(self) -> float:
-        """Seconds since last broadcast (0.0 if none received yet)."""
-        if self._last_broadcast_time <= 0:
-            return 0.0
-        return time.monotonic() - self._last_broadcast_time
+    def _auth_frame(self) -> bytes:
+        """0x01 + varint(len) + {1: uuid, 2: uuid}; every request starts with it."""
+        inner = _pb_string(1, self.user_uuid) + _pb_string(2, self.user_uuid)
+        return b"\x01" + encode_varint(len(inner)) + inner
 
-    @property
-    def last_display_map_age(self) -> float:
-        """Seconds since last display_map broadcast (999.0 if none received)."""
-        if self._last_display_map_time <= 0:
-            return 999.0
-        return time.monotonic() - self._last_display_map_time
+    def _build_publish_properties(self, topic: str) -> Properties:
+        corr = (
+            _pb_string(1, str(uuid.uuid1()))
+            + _pb_varint(3, 0)
+            + _pb_varint(4, int(time.time() * 1000))
+        )
+        props = Properties(PacketTypes.PUBLISH)
+        props.ResponseTopic = f"{topic}/response"
+        props.CorrelationData = corr
+        return props
+
+    # ------------------------------------------------------------------
+    # Connection
+    # ------------------------------------------------------------------
 
     async def connect(self) -> None:
-        """Establish WebSocket connection to the vacuum.
-
-        Raises:
-            NarwalConnectionError: If connection cannot be established.
-        """
-        try:
-            self._ws = await websockets.connect(
-                self.url,
-                ping_interval=WS_PING_INTERVAL,
-                ping_timeout=WS_PING_TIMEOUT,
-            )
-            self._connected.set()
-            _LOGGER.info("Connected to Narwal vacuum at %s", self.url)
-        except (OSError, websockets.exceptions.WebSocketException) as e:
-            raise NarwalConnectionError(
-                f"Failed to connect to {self.url}: {e}"
-            ) from e
-
-    async def discover_device_id(self, timeout: float = 15.0) -> str:
-        """Discover the device_id by waking the robot and reading its response.
-
-        The robot sleeps when idle and won't broadcast until woken. This method
-        sends a get_device_info command (with empty device_id) as a wake signal.
-        The robot's local WebSocket server processes commands regardless of the
-        device_id in the topic. The response contains the real device_id.
-
-        Falls back to extracting device_id from broadcast topics if the
-        command response doesn't contain it.
-
-        Args:
-            timeout: Seconds to wait for discovery.
-
-        Returns:
-            The device_id string.
-
-        Raises:
-            NarwalConnectionError: If not connected.
-            NarwalCommandError: If discovery fails within timeout.
-        """
-        if not self.connected:
-            raise NarwalConnectionError("Not connected to vacuum")
-
-        # Build wake frames using all known product key prefixes.
-        # The robot only responds to commands with its correct product key
-        # in the topic. Since we don't know the model yet, try all known
-        # keys until one provokes a response.
-        cmd = TOPIC_CMD_GET_DEVICE_INFO
-        wake_frames = [
-            build_frame(self._full_topic(cmd), b""),  # current prefix (default or user-set)
-            build_frame(f"//{cmd}", b""),  # bare topic, no prefix
-        ]
-        # Add frames for all known product keys (skip default, already included)
-        for key in KNOWN_PRODUCT_KEYS:
-            if key != self.topic_prefix.lstrip("/"):
-                wake_frames.append(
-                    build_frame(f"/{key}/{self.device_id}/{cmd}", b"")
-                )
-        # Send first batch (default + bare + first few known keys)
-        batch_size = min(5, len(wake_frames))
-        for frame in wake_frames[:batch_size]:
-            try:
-                await self._ws.send(frame)
-            except Exception as e:
-                _LOGGER.warning("Failed to send wake command: %s", e)
-        _LOGGER.debug(
-            "Sent discovery wake commands (%d prefixes, device_id='%s')",
-            batch_size, self.device_id,
-        )
-
-        wake_index = 0  # cycle through wake frames on retry
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                break
-            try:
-                data = await asyncio.wait_for(
-                    self._ws.recv(), timeout=min(remaining, 2.0)
-                )
-            except TimeoutError:
-                # Re-send wake commands, cycling through prefixes
-                try:
-                    await self._ws.send(wake_frames[wake_index % len(wake_frames)])
-                    wake_index += 1
-                    _LOGGER.debug("Re-sent wake-up command (variant %d)", wake_index)
-                except Exception:
-                    pass
-                continue
-
-            if not isinstance(data, bytes) or len(data) < 4:
-                continue
-
-            try:
-                msg = parse_frame(data)
-            except ProtocolError:
-                continue
-
-            # Check field5 response — get_device_info returns device_id in field 2
-            if msg.field_tag == PROTOBUF_FIELD5_TAG and msg.payload:
-                try:
-                    decoded = self._decode_protobuf(msg.payload)
-                    raw_id = decoded.get("2", b"")
-                    if isinstance(raw_id, bytes):
-                        raw_id = raw_id.decode("utf-8", errors="replace").strip()
-                    else:
-                        raw_id = str(raw_id).strip()
-                    if raw_id:
-                        self.device_id = raw_id
-                        _LOGGER.info("Discovered device_id from response: %s", self.device_id)
-                        return self.device_id
-                except Exception:
-                    _LOGGER.debug("Failed to decode response payload")
-
-            # Fallback: broadcast messages (field4/0x22) have device_id in topic
-            if msg.field_tag != PROTOBUF_FIELD5_TAG and msg.topic:
-                parts = msg.topic.split("/")
-                # Topic format: /{product_key}/{device_id}/{category}/{type}
-                if len(parts) >= 4 and parts[2]:
-                    # Extract product_key from topic to set correct prefix
-                    if parts[1]:
-                        self.topic_prefix = f"/{parts[1]}"
-                        _LOGGER.info("Topic prefix from broadcast: %s", self.topic_prefix)
-                    self.device_id = parts[2]
-                    _LOGGER.info("Discovered device_id from broadcast: %s", self.device_id)
-                    return self.device_id
-
-        raise NarwalCommandError(
-            f"No response or broadcast within {timeout}s — check vacuum IP and power"
-        )
-
-    async def drain_ws_buffer(self) -> None:
-        """Drain any pending messages from the WebSocket receive buffer.
-
-        Called between discover_device_id() and send_command() to clear
-        stale field5 responses left by wake probe commands. Without this,
-        _wait_for_field5_response may consume a stale response instead of
-        the real one, which can have unexpected data or error codes.
-        """
-        if not self.connected:
-            return
-        drained = 0
-        while True:
-            try:
-                data = await asyncio.wait_for(self._ws.recv(), timeout=0.05)
-                drained += 1
-            except TimeoutError:
-                break
-            except Exception:
-                break
-        if drained:
-            _LOGGER.debug("Drained %d stale messages from WebSocket buffer", drained)
-
-    async def disconnect(self) -> None:
-        """Disconnect from the vacuum and stop all tasks."""
-        self._should_reconnect = False
-        self._listener_active = False
-        self._robot_awake = False
+        """Connect to the MQTT broker (blocking parts run in an executor)."""
+        self._loop = asyncio.get_running_loop()
         self._connected.clear()
 
-        for task in (self._heartbeat_task, self._keepalive_task, self._listen_task):
-            if task and not task.done():
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+        def _connect_blocking() -> None:
+            self._setup_mqtt_client()
+            if not self._connected.wait(timeout=15.0):
+                if self._client:
+                    self._client.loop_stop()
+                raise NarwalConnectionError("MQTT connection timed out")
 
-        if self._ws:
-            await self._ws.close()
-            self._ws = None
+        await self._loop.run_in_executor(None, _connect_blocking)
+        await self.notify_active()
 
-        _LOGGER.info("Disconnected from Narwal vacuum")
+    def _setup_mqtt_client(self) -> None:
+        self._mqtt_client_id = f"{self._mqtt_client_id_prefix}_{uuid.uuid4()}"
+        _LOGGER.info("Connecting to %s:%d, base_topic=%s", self.broker, self.port, self.base_topic)
+        self._subscribed.clear()
+        self._client = mqtt.Client(
+            client_id=self._mqtt_client_id,
+            protocol=mqtt.MQTTv5,
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        )
+        self._client.username_pw_set(self._mqtt_username, self._mqtt_password)
+        self._client.tls_set_context(ssl.create_default_context())
+        self._client.on_connect = self._on_connect
+        self._client.on_message = self._on_message
+        self._client.on_disconnect = self._on_disconnect
+        self._client.on_subscribe = self._on_subscribe
+        self._client.connect(self.broker, self.port, keepalive=30)
+        self._client.loop_start()
 
-    async def start_listening(self) -> None:
-        """Start the persistent message listener with auto-reconnect.
-
-        This method runs indefinitely until disconnect() is called.
-        """
-        self._should_reconnect = True
-        retry_delay = RECONNECT_INITIAL_DELAY
-
-        while self._should_reconnect:
-            try:
-                if not self.connected:
-                    await self.connect()
-                    # Immediate wake burst on (re)connect — the fresh TCP
-                    # connection may trigger the robot's deep-sleep wake
-                    # interrupt, but only if we send commands before it
-                    # expires.  Don't wait for the keepalive loop's first
-                    # tick (15s delay would be too late).
-                    await self._send_wake_burst()
-
-                retry_delay = RECONNECT_INITIAL_DELAY  # reset on success
-                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-                self._keepalive_task = asyncio.create_task(self._keepalive_loop())
-                self._listener_active = True
-
-                async for raw_message in self._ws:
-                    if isinstance(raw_message, bytes):
-                        await self._handle_message(raw_message)
-                    # Hand the event loop back between frames. `websockets`
-                    # keeps yielding buffered frames without ever suspending,
-                    # so several frames end up handled inside a single loop
-                    # iteration (measured: up to 5) and their costs add up
-                    # into one blocking step. This costs nothing and caps the
-                    # block at a single frame.
-                    await asyncio.sleep(0)
-
-            except NarwalConnectionError as e:
-                _LOGGER.warning("Connection failed: %s", e)
-            except websockets.exceptions.ConnectionClosed as e:
-                _LOGGER.warning("Connection closed: %s", e)
-            except asyncio.CancelledError:
-                _LOGGER.debug("Listener cancelled")
-                return
-            except Exception:
-                _LOGGER.exception("Unexpected error in listener")
-            finally:
-                self._listener_active = False
-                self._robot_awake = False
-                self._connected.clear()
-                # Forget deduplication history: after a reconnect the first
-                # frame of every topic must reach the entities again.
-                self._last_payloads.clear()
-                for task in (self._heartbeat_task, self._keepalive_task):
-                    if task and not task.done():
-                        task.cancel()
-
-            if not self._should_reconnect:
-                break
-
-            # Exponential backoff with jitter
-            jitter = random.uniform(0, 1)
-            wait = retry_delay + jitter
-            _LOGGER.info("Reconnecting in %.1fs...", wait)
-            await asyncio.sleep(wait)
-            retry_delay = min(
-                retry_delay * RECONNECT_BACKOFF_FACTOR, RECONNECT_MAX_DELAY
-            )
-
-    async def _handle_message(self, data: bytes) -> None:
-        """Parse a raw frame and update state or route response."""
-        if len(data) < 4:
+    def _on_connect(self, client, userdata, connect_flags, reason_code, properties=None):
+        if not (str(reason_code) == "Success" or reason_code == 0):
+            _LOGGER.error("MQTT connection rejected: %s", reason_code)
             return
-
-        try:
-            msg = parse_frame(data)
-        except ProtocolError as e:
-            _LOGGER.debug("Failed to parse frame: %s", e)
-            return
-
-        # Field5 (0x2a) messages are command responses
-        if msg.field_tag == PROTOBUF_FIELD5_TAG:
-            _LOGGER.debug("Field5 response routed to queue: %s", msg.short_topic)
-            await self._response_queue.put(msg)
-            return
-
-        # Any broadcast means the robot is awake
-        self._last_broadcast_time = time.monotonic()
-        if not self._robot_awake:
-            self._robot_awake = True
-            _LOGGER.info("Robot is awake (received broadcast)")
-
-        if self.on_message:
-            self.on_message(msg)
-
-        # Decode protobuf and update state based on topic
-        short_topic = msg.short_topic
-
-        # Identical payload = nothing to learn. Dropping it here skips both
-        # the protobuf decode and the coordinator fan-out over every entity.
-        # Must stay BELOW the awake/last-broadcast bookkeeping above: a
-        # repeated frame is still proof that the robot is alive.
-        if self._is_duplicate_broadcast(short_topic, msg.payload):
-            return
-
-        _LOGGER.debug("Broadcast topic: %s (tag=0x%02x)", short_topic, msg.field_tag)
-        try:
-            decoded = self._decode_protobuf(msg.payload)
-        except Exception:
-            _LOGGER.debug("Failed to decode protobuf for topic %s", short_topic)
-            return
-
-        if short_topic == "status/working_status":
-            self.state.update_from_working_status(decoded)
-        elif short_topic == "status/robot_base_status":
-            self.state.update_from_base_status(decoded)
-        elif short_topic == "upgrade/upgrade_status":
-            self.state.update_from_upgrade_status(decoded)
-        elif short_topic == "status/download_status":
-            self.state.update_from_download_status(decoded)
-        elif short_topic == "status/point_navi_plan_traj":
-            traj = PlannedTrajectory.from_broadcast(decoded)
-            traj.received_at = time.monotonic()
-            self.state.planned_trajectory = traj
-        elif short_topic == "map/display_map":
-            disp = MapDisplayData.from_broadcast(decoded)
-            disp.received_at = time.monotonic()
-            self.state.map_display_data = disp
-            self._last_display_map_time = time.monotonic()
-            _LOGGER.debug(
-                "display_map received: robot=(%.2f, %.2f) ts=%d",
-                self.state.map_display_data.robot_x,
-                self.state.map_display_data.robot_y,
-                self.state.map_display_data.timestamp,
-            )
-        if self.on_state_update:
-            self.on_state_update(self.state)
-
-    def _is_duplicate_broadcast(self, short_topic: str, payload: bytes) -> bool:
-        """Return True when this payload repeats the previous one verbatim.
-
-        The robot re-broadcasts unchanged status frames at a fixed rate:
-        measured over 415 frames, 62% carried bytes identical to the
-        previous frame of the same topic (`download_status` and
-        `upgrade_status` 98.6%, `robot_base_status` 89.2%). Every
-        ``update_from_*`` handler is a plain setter, so decoding those
-        frames and pushing them to the entities cannot change anything —
-        it only blocks the event loop.
-
-        The comparison is on raw bytes rather than a digest: payloads are
-        small (2-200 B for the deduplicated topics) and ``bytes.__eq__``
-        is a length check plus memcmp, which beats hashing them and has no
-        collision risk. Only one payload per topic is retained.
-        """
-        if short_topic in DEDUP_EXEMPT_TOPICS:
-            return False
-
-        cache = self._last_payloads
-        if cache.get(short_topic) == payload:
-            return True
-
-        if short_topic not in cache and len(cache) >= DEDUP_CACHE_MAX_TOPICS:
-            # Evict the oldest entry (dicts keep insertion order) so topics
-            # that stopped arriving cannot pin memory forever.
-            del cache[next(iter(cache))]
-        cache[short_topic] = payload
-        return False
-
-    def _decode_protobuf(self, payload: bytes) -> dict[str, Any]:
-        """Decode a protobuf payload without a schema.
-
-        Fast path: our own wire-format decoder (``protobuf_decoder``), which is
-        bit-for-bit compatible with blackboxprotobuf for every payload it
-        accepts — verified against 325 unique captured live frames and 40k
-        generated payloads.  It is ~7x faster on a Home Assistant host, which
-        matters because this runs inline in the event loop for every broadcast
-        (~3/s).
-
-        Fallback: blackboxprotobuf, for the payloads our decoder refuses.  That
-        happens when reproducing bbpb's output would need bbpb's own type
-        inference (a repeated message field whose sub-fields change type
-        between occurrences — bbpb then files them under suffixed keys such as
-        ``"12-1"``), and for genuinely malformed payloads.  We fall back rather
-        than skip the frame: a skipped broadcast means state that silently
-        stops updating, while bbpb has been decoding these payloads correctly
-        for the whole life of the integration.  bbpb stays a hard dependency
-        regardless — the command *encoders* still use it.
-        """
-        try:
-            return decode_protobuf(payload)
-        except ProtobufDecodeError as err:
-            self._decode_fallbacks += 1
-            if self._decode_fallbacks == 1:
-                # Once, loudly: if this ever fires in the field we want to know,
-                # because the fast path is why the event loop stopped stalling.
-                _LOGGER.warning(
-                    "Falling back to blackboxprotobuf for a %d-byte payload "
-                    "(%s). Further occurrences are logged at debug level.",
-                    len(payload),
-                    err,
-                )
+        _LOGGER.info("MQTT connected (%s)", self.base_topic)
+        self._subscribed.clear()
+        self._sub_topics.clear()
+        topics = [f"{self.base_topic}/{t}" for t in BROADCAST_TOPICS]
+        topics += [f"{self.base_topic}/{t}/response" for t in _PRESUBSCRIBE]
+        for topic in topics:
+            rc, mid = client.subscribe(topic, qos=1)
+            if rc == 0:
+                # Optimistic: _on_subscribe removes it again if the broker refuses.
+                self._sub_topics[mid] = topic
+                self._subscribed.add(topic)
             else:
-                _LOGGER.debug(
-                    "blackboxprotobuf fallback #%d for a %d-byte payload (%s)",
-                    self._decode_fallbacks,
-                    len(payload),
-                    err,
-                )
+                _LOGGER.warning("SUBSCRIBE %s not sent (rc=%s)", topic, rc)
+        self._connected.set()
+        self.state.device_reachable = True
+        self._notify_state_update()
 
-        import blackboxprotobuf  # lazy import — heavy dependency
+    def _on_subscribe(self, client, userdata, mid, reason_codes, properties=None):
+        topic = self._sub_topics.pop(mid, None)
+        codes = reason_codes if isinstance(reason_codes, list) else [reason_codes]
+        failed = [c for c in codes if getattr(c, "is_failure", False)]
+        if failed and topic:
+            # Without this subscription the robot's replies never arrive, so
+            # forget it; _ensure_subscribed retries before the next command.
+            self._subscribed.discard(topic)
+            _LOGGER.warning("Broker refused subscription to %s: %s", topic, failed)
+        evt = self._pending_subacks.pop(mid, None)
+        if evt:
+            evt.set()
 
-        decoded, _ = blackboxprotobuf.decode_message(payload)
-        return decoded
+    def _handle_reply(self, msg) -> None:
+        props = getattr(msg, "properties", None)
+        corr = getattr(props, "CorrelationData", None) if props is not None else None
+        if corr:
+            corr = bytes(corr)
+            pending = self._pending_responses.pop(corr, None)
+            if pending is None:
+                _LOGGER.debug("Reply on %s is for another client or arrived late", msg.topic.rsplit("/", 2)[-2])
+                return
+            if self._pending_by_topic.get(msg.topic) == corr:
+                del self._pending_by_topic[msg.topic]
+        else:
+            key = self._pending_by_topic.pop(msg.topic, None)
+            pending = self._pending_responses.pop(key, None) if key is not None else None
+            if pending is None:
+                return
+        event, holder = pending
+        holder[0] = msg.payload
+        event.set()
 
-    async def _heartbeat_loop(self) -> None:
-        """Send periodic WebSocket pings to keep the connection alive."""
-        try:
-            while self.connected:
-                await asyncio.sleep(HEARTBEAT_INTERVAL)
-                if self._ws:
-                    await self._ws.ping()
-                    _LOGGER.debug("Heartbeat ping sent")
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            _LOGGER.debug("Heartbeat failed, connection may be lost")
+    def _on_disconnect(self, client, userdata, disconnect_flags=None, reason_code=None, properties=None):
+        _LOGGER.warning("MQTT disconnected: %s", reason_code)
+        self._connected.clear()
+        self.state.device_reachable = False
+        self._notify_state_update()
 
-    # --- Wake / Keep-alive ---
-
-    @staticmethod
-    def _encode_varint(value: int) -> bytes:
-        """Encode an integer as a protobuf varint."""
-        result = []
-        while value > 0x7F:
-            result.append((value & 0x7F) | 0x80)
-            value >>= 7
-        result.append(value & 0x7F)
-        return bytes(result)
-
-    @classmethod
-    def _encode_varint_field(cls, field_num: int, value: int) -> bytes:
-        """Encode a protobuf varint field (tag + value)."""
-        tag = (field_num << 3) | 0  # wire type 0 = varint
-        return cls._encode_varint(tag) + cls._encode_varint(value)
-
-    @classmethod
-    def _encode_bytes_field(cls, field_num: int, data: bytes) -> bytes:
-        """Encode a protobuf length-delimited field."""
-        tag = (field_num << 3) | 2  # wire type 2 = length-delimited
-        return cls._encode_varint(tag) + cls._encode_varint(len(data)) + data
-
-    @classmethod
-    def _encode_string_field(cls, field_num: int, text: str) -> bytes:
-        """Encode a protobuf string field."""
-        return cls._encode_bytes_field(field_num, text.encode("utf-8"))
-
-    # All broadcast topics the robot can send — used for active_robot_publish
-    _ALL_BROADCAST_TOPICS = [
-        "status/robot_base_status",
-        "status/working_status",
-        "upgrade/upgrade_status",
-        "status/download_status",
-        "map/display_map",
-        "status/time_line_status",
-        "status/point_navi_plan_traj",
-        "developer/planning_debug_info",
-    ]
-
-    def _build_topic_subscription(self, duration: int = 600) -> bytes:
-        """Build active_robot_publish payload subscribing to ALL broadcast topics.
-
-        The Narwal app sends this on open to tell the robot which topics to
-        broadcast and for how long. Format: repeated field 1 = TopicDuration
-        sub-messages with {1: topic_string, 2: duration_seconds}.
-        """
-        payload = b""
-        for topic in self._ALL_BROADCAST_TOPICS:
-            inner = (
-                self._encode_string_field(1, topic)
-                + self._encode_varint_field(2, duration)
-            )
-            payload += self._encode_bytes_field(1, inner)
-        return payload
-
-    async def subscribe_to_topics(self, duration: int = 600) -> None:
-        """Send topic subscription to the robot.
-
-        This tells the robot to broadcast display_map, working_status, etc.
-        Must be called after connecting, especially if the robot is already
-        awake (wake() skips the burst when robot_awake is True).
-        """
-        if not self.connected or not self._ws:
-            return
-        payload = self._build_topic_subscription(duration)
-        frame = build_frame(
-            self._full_topic(TOPIC_CMD_ACTIVE_ROBOT), payload
-        )
-        await self._ws.send(frame)
-        _LOGGER.info("Topic subscription sent (duration=%ds)", duration)
-
-    def _build_wake_commands(self) -> list[tuple[str, bytes]]:
-        """Build the sequence of wake commands to try.
-
-        Returns list of (short_topic, payload) tuples.  The first four
-        commands are passive (subscription / heartbeat).  The final
-        command is a query (get_device_base_status) that forces the
-        robot's main processor to fully wake and enter command-ready
-        mode.  Its field5 response ends up in _response_queue and is
-        harmlessly drained by send_command() before real commands.
-        """
-        cmds: list[tuple[str, bytes]] = []
-
-        # 1. notify_app_event — signal "app opened" (triggers robot wake)
-        cmds.append((TOPIC_CMD_NOTIFY_APP_EVENT, self._encode_varint_field(1, 1)))
-
-        # 2. active_robot_publish — subscribe to ALL topics for 10 minutes
-        cmds.append((TOPIC_CMD_ACTIVE_ROBOT, self._build_topic_subscription(600)))
-
-        # 3. active_robot_publish — simple duration (field 1 = 600)
-        cmds.append((TOPIC_CMD_ACTIVE_ROBOT, self._encode_varint_field(1, 600)))
-
-        # 4. app heartbeat — field 1 = 1
-        cmds.append((TOPIC_CMD_APP_HEARTBEAT, self._encode_varint_field(1, 1)))
-
-        # 5. get_device_base_status — forces robot CPU into command-ready
-        #    state; passive commands alone only wake the WS server, not the
-        #    application processor.  The field5 response is drained by
-        #    send_command() before it processes real user commands.
-        cmds.append((TOPIC_CMD_GET_BASE_STATUS, b""))
-
-        return cmds
-
-    async def _send_wake_burst(self) -> None:
-        """Send all wake candidate commands in quick succession.
-
-        Fire-and-forget: sends each command with a short delay between them.
-        Does not wait for responses (the listener loop handles those).
-        """
-        if not self.connected or not self._ws:
-            return
-
-        commands = self._build_wake_commands()
-        for short_topic, payload in commands:
+    def _notify_state_update(self) -> None:
+        cb = self.on_state_update
+        loop = self._loop
+        if cb and loop:
             try:
-                full_topic = self._full_topic(short_topic)
-                frame = build_frame(full_topic, payload)
-                await self._ws.send(frame)
-                _LOGGER.debug("Wake burst: sent %s (%d bytes)", short_topic, len(payload))
-            except Exception:
-                _LOGGER.debug("Wake burst: failed to send %s", short_topic)
-                return  # connection probably lost
-            await asyncio.sleep(0.2)
+                loop.call_soon_threadsafe(cb, self.state)
+            except RuntimeError:
+                pass
 
-    async def wake(self, timeout: float = WAKE_TIMEOUT, force: bool = False) -> bool:
-        """Attempt to wake the robot from sleep.
+    # ------------------------------------------------------------------
+    # Incoming messages
+    # ------------------------------------------------------------------
 
-        Sends repeated bursts of wake commands and waits for the robot to
-        start broadcasting status messages.  Does NOT reconnect the
-        WebSocket — the keepalive loop handles reconnect escalation
-        independently (avoids race conditions with the listener loop).
-
-        Args:
-            timeout: Maximum seconds to wait for the robot to respond.
-            force: If True, send wake burst even if robot_awake is True.
-                Use when broadcasts have gone stale but the flag hasn't
-                been reset yet.
-
-        Returns:
-            True if the robot is awake (received broadcasts), False otherwise.
-        """
-        if self._robot_awake and not force:
-            return True
-
-        if not self.connected:
-            raise NarwalConnectionError("Not connected to vacuum")
-
-        _LOGGER.info("Attempting to wake robot (timeout=%.0fs)...", timeout)
-
-        deadline = asyncio.get_event_loop().time() + timeout
-        attempt = 0
-
-        while asyncio.get_event_loop().time() < deadline:
-            attempt += 1
-
-            if not self.connected:
-                _LOGGER.debug("Connection lost during wake — aborting")
-                break
-
-            await self._send_wake_burst()
-
-            # Wait up to 5 seconds for a broadcast to arrive
-            wait_end = min(
-                asyncio.get_event_loop().time() + 5.0,
-                deadline,
-            )
-            while asyncio.get_event_loop().time() < wait_end:
-                if self._robot_awake:
-                    _LOGGER.info("Robot woke up after %d attempt(s)", attempt)
-                    return True
-                await asyncio.sleep(0.3)
-
-        _LOGGER.warning("Robot did not wake up within %.0fs (%d attempts)", timeout, attempt)
-        return False
-
-    async def ensure_awake(self, timeout: float = WAKE_TIMEOUT) -> bool:
-        """Make sure the robot is listening before a command goes out.
-
-        Prefers the age of the last broadcast over the robot_awake flag: the
-        flag survives up to BROADCAST_STALE_TIMEOUT of silence, and a command
-        sent in that window skips the wake burst and lands nowhere.
-
-        Returns:
-            True if the robot is broadcasting, False if it stayed silent. The
-            caller may still send the command — a shallow sleeper often obeys
-            without ever confirming the wake, and send_command() retries once
-            behind a forced wake if it does not.
-        """
-        stale = self.last_broadcast_age > AWAKE_BROADCAST_MAX_AGE
-        if self._robot_awake and not stale:
-            return True
-
-        _LOGGER.debug(
-            "Robot not broadcasting (awake=%s, last broadcast %.1fs ago) — "
-            "sending wake burst",
-            self._robot_awake,
-            self.last_broadcast_age,
-        )
-        return await self.wake(timeout=timeout, force=stale)
-
-    # Topic subscription duration (seconds) and renewal interval
-    _TOPIC_SUB_DURATION = 600  # 10 minutes — matches what Narwal app sends
-    _TOPIC_RESUB_INTERVAL = 480  # re-subscribe every 8 min (before 10min expiry)
-
-    # After this many consecutive wake bursts without response (~60s),
-    # force a WebSocket reconnect to try triggering the robot's deep sleep
-    # wake handler via a fresh TCP connection.
-    _WAKE_RECONNECT_THRESHOLD = 2
-
-    async def _keepalive_loop(self) -> None:
-        """Periodically send wake/heartbeat commands to prevent robot from sleeping.
-
-        Runs alongside the listener loop. Sends a lightweight heartbeat
-        command every KEEPALIVE_INTERVAL seconds. If the robot stops
-        broadcasting for BROADCAST_STALE_TIMEOUT seconds (goes back to
-        sleep), resets _robot_awake and escalates to a full wake burst.
-
-        Also re-subscribes to broadcast topics before the subscription
-        expires (every _TOPIC_RESUB_INTERVAL seconds) so that display_map,
-        robot_base_status, etc. keep flowing during long cleaning sessions.
-
-        If wake bursts fail repeatedly, forces a WebSocket reconnect by
-        closing the connection (the listener loop handles reconnection).
-        """
-        # Start at 0 so the first keepalive tick sends the subscription
-        # immediately. This handles the case where the robot is already
-        # broadcasting (e.g. mid-cleaning) and wake() skips the burst.
-        last_resub_time = 0.0
-        consecutive_wake_failures = 0
-        try:
-            while self.connected:
-                await asyncio.sleep(KEEPALIVE_INTERVAL)
-                if not self.connected or not self._ws:
-                    break
-
-                # Check if broadcasts have gone stale (robot fell back asleep)
-                if (
-                    self._robot_awake
-                    and self._last_broadcast_time > 0
-                    and time.monotonic() - self._last_broadcast_time
-                    > BROADCAST_STALE_TIMEOUT
-                ):
-                    _LOGGER.info(
-                        "No broadcast for %.0fs — robot may have gone to sleep",
-                        time.monotonic() - self._last_broadcast_time,
-                    )
-                    self._robot_awake = False
-                    consecutive_wake_failures = 0
-
-                if self._robot_awake:
-                    consecutive_wake_failures = 0
-                    # Re-subscribe to topics before the subscription expires
-                    if time.monotonic() - last_resub_time > self._TOPIC_RESUB_INTERVAL:
-                        try:
-                            payload = self._build_topic_subscription(
-                                self._TOPIC_SUB_DURATION
-                            )
-                            frame = build_frame(
-                                self._full_topic(TOPIC_CMD_ACTIVE_ROBOT), payload
-                            )
-                            await self._ws.send(frame)
-                            last_resub_time = time.monotonic()
-                            _LOGGER.debug("Topic subscription renewed")
-                        except Exception:
-                            _LOGGER.debug("Topic re-subscribe failed")
-
-                    # Send lightweight heartbeat to keep robot awake.
-                    # The Narwal app sends this continuously regardless of
-                    # robot state — it's safe during cleaning.
-                    try:
-                        payload = self._encode_varint_field(1, 1)
-                        frame = build_frame(
-                            self._full_topic(TOPIC_CMD_APP_HEARTBEAT), payload
-                        )
-                        await self._ws.send(frame)
-                        _LOGGER.debug("Keepalive heartbeat sent")
-                    except Exception:
-                        _LOGGER.debug("Keepalive send failed")
-                        break
-                else:
-                    # Robot appears asleep — send full wake burst
-                    # (wake burst includes topic subscription)
-                    consecutive_wake_failures += 1
-                    _LOGGER.debug(
-                        "Robot not awake, sending wake burst "
-                        "(attempt %d/%d before reconnect)",
-                        consecutive_wake_failures,
-                        self._WAKE_RECONNECT_THRESHOLD,
-                    )
-                    await self._send_wake_burst()
-                    last_resub_time = time.monotonic()
-
-                    # Escalation: after repeated failures, force a fresh
-                    # WebSocket connection. Close the socket — the listener
-                    # loop's reconnect logic will establish a new connection.
-                    if consecutive_wake_failures >= self._WAKE_RECONNECT_THRESHOLD:
-                        _LOGGER.warning(
-                            "Wake burst failed %d times — forcing WebSocket "
-                            "reconnect to trigger deep sleep wake",
-                            consecutive_wake_failures,
-                        )
-                        consecutive_wake_failures = 0
-                        if self._ws:
-                            await self._ws.close()
-                        break  # exit keepalive; listener reconnects
-
-        except asyncio.CancelledError:
+    def _on_message(self, client, userdata, msg):
+        self.last_message_time = time.time()
+        if msg.topic.endswith("/response"):
+            self._handle_reply(msg)
             return
-        except Exception:
-            _LOGGER.debug("Keepalive loop error, will restart with listener")
 
-    # --- Command infrastructure ---
+        suffix = msg.topic[len(self.base_topic):].lstrip("/")
+        msg_type = _PUSH_TYPES.get(suffix)
+        if not msg_type:
+            return
+        self.last_push_time = time.time()
+        try:
+            data = decode(msg_type, strip_narwal_frame(msg.payload))
+        except ProtoError:
+            _LOGGER.debug("Undecodable %s push: %s", suffix, msg.payload.hex())
+            return
+        if suffix == TOPIC_ROBOT_BASE_STATUS:
+            self.state.update_base_status(data)
+        elif suffix == TOPIC_WORKING_STATUS:
+            self.state.update_working_status(data)
+        elif suffix == TOPIC_DISPLAY_MAP:
+            self.state.update_display_map(data)
+        elif suffix == TOPIC_UPGRADE_STATUS:
+            _LOGGER.info("Firmware upgrade status: %s", data)
+        self.state.device_reachable = True
+        self._notify_state_update()
+
+    # ------------------------------------------------------------------
+    # Commands
+    # ------------------------------------------------------------------
 
     async def send_command(
         self,
-        short_topic: str,
-        payload: bytes = b"",
+        command: str,
+        request: bytes = b"",
+        *,
         timeout: float = COMMAND_RESPONSE_TIMEOUT,
+        response_type: str | None = None,
+        check: bool = True,
+        retry: bool = True,
+        wake: bool = True,
     ) -> CommandResponse:
-        """Send a command, recovering once from a lost connection or a sleeper.
+        """Send ``command`` with an encoded request body; wait for the reply.
 
-        A command can fail for two reasons that look identical from the
-        outside: the socket died under it (the library drops the connection on
-        a late pong, which a robot roaming the house triggers regularly), or
-        the robot stopped listening and never answered. Both are recoverable —
-        wait for the listener loop to reconnect, force a wake burst, re-send.
-
-        The retry is unconditional when the frame provably never left the
-        socket. When the robot may already have executed the command, only
-        topics in IDEMPOTENT_COMMANDS are re-sent.
-
-        Args:
-            short_topic: Command topic without prefix/device_id.
-            payload: Protobuf-encoded payload (empty for most commands).
-            timeout: Seconds to wait for response.
-
-        Returns:
-            CommandResponse with result code and decoded data.
-
-        Raises:
-            NarwalConnectionError: If not connected and reconnecting failed.
-            NarwalCommandError: If the response times out twice.
+        A robot in deep sleep keeps its MQTT connection but ignores commands.
+        With ``wake`` (user actions), a robot that looks asleep is woken first;
+        with ``retry``, a timed-out command triggers a full wake-up and is sent
+        once more after the robot has answered. Background reads pass
+        ``wake=False, retry=False`` so polling never wakes the robot.
+        With ``check`` a non-success ServiceResult raises NarwalCommandError
+        with a readable reason.
         """
-        first_error: Exception
+        if not self._client or not self.connected:
+            raise NarwalConnectionError("Not connected")
+        loop = self._loop or asyncio.get_running_loop()
+        # response_type=None -> look up / generic ServiceResult; "" -> don't decode.
+        rtype = RESPONSE_TYPES.get(command, _GENERIC_RESULT) if response_type is None else response_type
+        if wake and self.probably_asleep():
+            await self.wake()
         try:
-            return await self._send_command_once(short_topic, payload, timeout)
-        except NarwalTransportError as err:
-            first_error, frame_sent = err, err.frame_sent
-        except NarwalConnectionError as err:
-            # The pre-flight check failed, so there was no socket to send on.
-            first_error, frame_sent = err, False
+            raw = await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
         except NarwalCommandError as err:
-            # The frame went out but the robot stayed silent. It may still have
-            # acted on it, so treat the command as possibly delivered.
-            first_error, frame_sent = err, True
+            if not (retry and err.timeout):
+                raise
+            raw = await self._recover_and_resend(command, request, timeout, err)
 
-        if frame_sent and short_topic not in IDEMPOTENT_COMMANDS:
-            _LOGGER.debug(
-                "Not retrying '%s' — the robot may already have executed it (%s)",
-                short_topic,
-                first_error,
-            )
-            raise first_error
+        resp = CommandResponse.parse(command, raw, rtype)
+        if check and not resp.success:
+            reason = SERVICE_RESULT_MESSAGES.get(str(resp.result), str(resp.result))
+            raise NarwalCommandError(f"{command}: {reason}", result=resp.result)
+        return resp
 
-        _LOGGER.warning(
-            "Command '%s' failed (%s) — reconnecting, waking and retrying once",
-            short_topic,
-            first_error,
-        )
+    async def _recover_and_resend(
+        self, command: str, request: bytes, timeout: float, err: NarwalCommandError,
+    ) -> bytes:
+        """A command timed out: recover, then send it again.
 
-        if not await self._await_connection(COMMAND_RECONNECT_WAIT):
-            raise first_error
+        Seen live, two causes look alike at first: the robot dozing off (while
+        drying mops it stops answering, keeps broadcasting for ~1 min, then goes
+        quiet) and a connection that stops receiving replies. If the robot was
+        broadcasting a moment ago, rebuild the connection and resend; if it
+        still doesn't answer, or was already quiet, wake it and resend.
+        """
+        loop = self._loop or asyncio.get_running_loop()
+        if self.pushing_recently():
+            _LOGGER.warning("%s timed out while the robot was broadcasting; resetting the connection", command)
+            await self.reset_connection()
+            try:
+                return await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
+            except NarwalCommandError as retry_err:
+                if not retry_err.timeout:
+                    raise
+                err = retry_err
+        _LOGGER.info("%s timed out; waking the robot and retrying", command)
+        if not await self.wake():
+            raise NarwalCommandError(f"{command}: the robot did not wake up", timeout=True) from err
+        return await loop.run_in_executor(None, self._send_blocking, command, request, timeout)
 
-        # robot_awake is exactly the flag that just proved untrustworthy, so
-        # force the burst instead of letting wake() short-circuit on it.
-        await self.wake(timeout=COMMAND_RETRY_WAKE_TIMEOUT, force=True)
+    def pushing_recently(self, window: float = 15.0) -> bool:
+        """True if a status broadcast arrived in the last ``window`` seconds."""
+        return time.time() - self.last_push_time < window
 
-        return await self._send_command_once(short_topic, payload, timeout)
+    async def reset_connection(self) -> None:
+        """Throw away the MQTT client and all request state; connect afresh.
 
-    async def _await_connection(self, timeout: float) -> bool:
-        """Wait for the listener loop to (re)establish the connection."""
-        if self.connected:
+        Equivalent to reloading the integration, which is what recovered a
+        connection that kept receiving broadcasts but no replies.
+        """
+        if self._reset_lock is None:
+            self._reset_lock = asyncio.Lock()
+        async with self._reset_lock:
+            if time.monotonic() - self.last_reset_time < 10:
+                return  # another caller just did it
+            await self.disconnect()
+            for event, _holder in list(self._pending_responses.values()):
+                event.set()  # release anyone still waiting on the old client
+            self._pending_responses.clear()
+            self._pending_by_topic.clear()
+            self._pending_subacks.clear()
+            self._sub_topics.clear()
+            self._subscribed.clear()
+            self._command_locks.clear()
+            await self.connect()
+            self.last_reset_time = time.monotonic()
+
+    def probably_asleep(self) -> bool:
+        """True if the robot is likely in deep sleep (ignoring commands)."""
+        if self.state.sub_status.startswith("IDLE_STATUS_LOW_POWER"):
             return True
-        try:
-            await asyncio.wait_for(self._connected.wait(), timeout=timeout)
-        except TimeoutError:
-            _LOGGER.warning(
-                "Still no connection to the robot after %.0fs", timeout
-            )
-            return False
-        return True
+        return time.time() - self.last_message_time > ASLEEP_AFTER_SECONDS
 
-    async def _send_command_once(
-        self,
-        short_topic: str,
-        payload: bytes,
-        timeout: float,
-    ) -> CommandResponse:
-        """Send a command once and wait for the field5 response.
+    async def wake(self) -> bool:
+        """Wake the robot the way the Narwal app does; True once it answers.
 
-        Uses a lock to prevent concurrent commands from racing on the
-        response queue. Works both with and without start_listening().
+        Sends the app's "entered device page" event, then active_robot_publish
+        as a request, waiting for the reply with growing timeouts
+        (WAKE_TIMEOUTS, ~76 s worst case). Concurrent callers share one wake-up.
         """
-        if not self.connected:
-            raise NarwalConnectionError("Not connected to vacuum")
-
-        async with self._command_lock:
-            # Drain any stale responses (e.g. from fire-and-forget wake burst)
-            drained = 0
-            while not self._response_queue.empty():
+        if self._wake_lock is None:
+            self._wake_lock = asyncio.Lock()
+        async with self._wake_lock:
+            if time.monotonic() - self.last_wake_time < 5:
+                return True  # another caller just woke it
+            await self._publish_no_response(
+                TOPIC_CMD_NOTIFY_APP_EVENT,
+                encode("NotifyAppEvent_Request", {"appEvent": "APP_EVENT_ENTER_DEVICE_PAGE"}),
+            )
+            started = time.monotonic()
+            for attempt, attempt_timeout in enumerate(WAKE_TIMEOUTS, start=1):
                 try:
-                    self._response_queue.get_nowait()
-                    drained += 1
-                except asyncio.QueueEmpty:
-                    break
-            if drained:
-                _LOGGER.debug("Drained %d stale field5 responses", drained)
-
-            full_topic = self._full_topic(short_topic)
-            frame = build_frame(full_topic, payload)
-            try:
-                await self._ws.send(frame)
-            except (websockets.exceptions.WebSocketException, OSError) as err:
-                raise NarwalTransportError(
-                    f"Connection lost while sending '{short_topic}': {err}",
-                    frame_sent=False,
-                ) from err
-            _LOGGER.debug("Sent command: %s (%d bytes)", short_topic, len(frame))
-
-            # If listener is running, wait on the queue (avoid concurrent recv)
-            if self._listener_active:
-                try:
-                    msg = await asyncio.wait_for(
-                        self._response_queue.get(), timeout=timeout
+                    await self.send_command(
+                        TOPIC_CMD_ACTIVE_ROBOT, self._active_request(),
+                        timeout=attempt_timeout, check=False, retry=False, wake=False,
                     )
-                except TimeoutError:
-                    raise NarwalCommandError(
-                        f"No response for command '{short_topic}' within {timeout}s"
-                    ) from None
-            else:
-                # No listener — read directly from websocket
-                msg = await self._wait_for_field5_response(timeout)
-
-        # Decode response
-        try:
-            decoded = self._decode_protobuf(msg.payload)
-        except Exception:
-            decoded = {}
-
-        # Field 1 is a result code for action commands (int),
-        # but data for some query commands (string/bytes/dict).
-        # Room-clean returns field 1 as a dict (config echo), not an int.
-        raw_field1 = decoded.get("1", 0)
-        try:
-            result_code = int(raw_field1)
-        except (ValueError, TypeError):
-            result_code = CommandResult.SUCCESS  # non-int field 1 = data response = success
-
-        return CommandResponse(
-            result_code=result_code,
-            data=decoded,
-            raw_payload=msg.payload,
-        )
-
-    async def _wait_for_field5_response(
-        self, timeout: float
-    ) -> NarwalMessage:
-        """Read from WebSocket until a field5 response arrives."""
-        import time
-
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                data = await asyncio.wait_for(
-                    self._ws.recv(), timeout=min(remaining, 1.0)
+                except NarwalCommandError as err:
+                    if not err.timeout:
+                        raise
+                    continue
+                self.last_wake_time = time.monotonic()
+                self.needs_reconnect = False
+                _LOGGER.info(
+                    "Robot answered after %d wake attempt(s) (%.1f s)",
+                    attempt, self.last_wake_time - started,
                 )
-            except TimeoutError:
-                continue
-            except (websockets.exceptions.WebSocketException, OSError) as err:
-                raise NarwalTransportError(
-                    f"Connection lost while waiting for a response: {err}",
-                    frame_sent=True,
-                ) from err
+                return True
+            _LOGGER.warning("Robot did not wake up after %.0f s", time.monotonic() - started)
+            # Either it's offline or our connection silently stopped routing;
+            # let the coordinator refresh the token and reconnect.
+            self.needs_reconnect = True
+            return False
 
-            if not isinstance(data, bytes) or len(data) < 4:
-                continue
+    def _ensure_subscribed(self, topic: str) -> None:
+        with self._sub_lock:
+            if topic in self._subscribed:
+                return
+            evt = threading.Event()
+            rc, mid = self._client.subscribe(topic, qos=1)
+            if rc != 0:
+                _LOGGER.warning("SUBSCRIBE %s not sent (rc=%s)", topic, rc)
+                return
+            self._sub_topics[mid] = topic
+            self._subscribed.add(topic)
+            self._pending_subacks[mid] = evt
+            if not evt.wait(timeout=3.0):
+                self._subscribed.discard(topic)
+                _LOGGER.warning("No SUBACK for %s within 3 s", topic)
 
-            try:
-                msg = parse_frame(data)
-            except ProtocolError:
-                continue
+    def _send_blocking(self, command: str, request: bytes, timeout: float) -> bytes:
+        lock = self._command_locks.setdefault(command, threading.Lock())
+        with lock:
+            topic = f"{self.base_topic}/{command}"
+            response_topic = f"{topic}/response"
+            self._ensure_subscribed(response_topic)
+            event = threading.Event()
+            holder: list[bytes | None] = [None]
+            props = self._build_publish_properties(topic)
+            corr = bytes(props.CorrelationData)
+            self._pending_responses[corr] = (event, holder)
+            self._pending_by_topic[response_topic] = corr
+            self._client.publish(topic, self._auth_frame() + request, qos=PUBLISH_QOS, properties=props)
+            if not event.wait(timeout=timeout):
+                self._pending_responses.pop(corr, None)
+                if self._pending_by_topic.get(response_topic) == corr:
+                    del self._pending_by_topic[response_topic]
+                raise NarwalCommandError(f"{command} timed out", timeout=True)
+            if holder[0] is None:  # released by reset_connection(), no reply
+                raise NarwalCommandError(f"{command} interrupted by a reconnect", timeout=True)
+            return holder[0]
 
-            if msg.field_tag == PROTOBUF_FIELD5_TAG:
-                return msg
-
-            # Process broadcast messages while waiting
-            short_topic = msg.short_topic
-            try:
-                decoded = self._decode_protobuf(msg.payload)
-            except Exception:
-                continue
-
-            if short_topic == "status/working_status":
-                self.state.update_from_working_status(decoded)
-            elif short_topic == "status/robot_base_status":
-                self.state.update_from_base_status(decoded)
-            elif short_topic == "upgrade/upgrade_status":
-                self.state.update_from_upgrade_status(decoded)
-            elif short_topic == "status/download_status":
-                self.state.update_from_download_status(decoded)
-            elif short_topic == "status/point_navi_plan_traj":
-                traj = PlannedTrajectory.from_broadcast(decoded)
-                traj.received_at = time.monotonic()
-                self.state.planned_trajectory = traj
-            elif short_topic == "map/display_map":
-                disp = MapDisplayData.from_broadcast(decoded)
-                disp.received_at = time.monotonic()
-                self.state.map_display_data = disp
-
-        raise NarwalCommandError(
-            f"No field5 response within {timeout}s"
+    async def _publish_no_response(self, command: str, request: bytes) -> None:
+        if not self._client or not self.connected:
+            raise NarwalConnectionError("Not connected")
+        topic = f"{self.base_topic}/{command}"
+        self._client.publish(
+            topic, self._auth_frame() + request, qos=PUBLISH_QOS,
+            properties=self._build_publish_properties(topic),
         )
-
-    async def send_raw(
-        self, topic: str, payload: bytes, header_byte: int | None = None
-    ) -> None:
-        """Send a raw command frame to the vacuum.
-
-        Args:
-            topic: Full topic string.
-            payload: Protobuf-encoded payload.
-            header_byte: Header byte (auto-calculated if None).
-
-        Raises:
-            NarwalConnectionError: If not connected.
-        """
-        if not self.connected:
-            raise NarwalConnectionError("Not connected to vacuum")
-
-        frame = build_frame(topic, payload, header_byte)
-        await self._ws.send(frame)
-        _LOGGER.debug("Sent raw to topic: %s (%d bytes)", topic, len(frame))
-
-    # --- High-level commands ---
-
-    async def locate(self) -> CommandResponse:
-        """Trigger locate sound — robot says 'Robot is here'."""
-        return await self.send_command(TOPIC_CMD_YELL)
-
-    # Legacy clean task payload — works on Flow firmware < v01.07.22.
-    # Structure: {1: {2: {}, 5: {1: {1: 3, 2: 2, 3: 1}, 5: {}}}}
-    #   field 5.1.1 = suction level (3=max)
-    #   field 5.1.2 = mop humidity (2=wet)
-    #   field 5.1.3 = passes (1=single)
-    # On firmware v01.07.22+ (Flow), this returns NOT_APPLICABLE and
-    # start() falls back to the v2 room-list schema. See issue #36.
-    _DEFAULT_CLEAN_PAYLOAD = bytes.fromhex("0a0e12002a0a0a060803100218012a00")
-
-    async def start(
-        self, clean_mode: CleanMode | int | None = None, **kwargs
-    ) -> CommandResponse:
-        """Start whole-house cleaning.
-
-        Tries the legacy minimal payload first (works on Flow firmware
-        < v01.07.22). If the robot returns NOT_APPLICABLE — observed on
-        firmware v01.07.22.00 in issue #36 — falls back to the v2 schema
-        that includes an explicit room list, mirroring what the Narwal
-        app sends on newer firmware.
-
-        The v2 fallback requires the map to be loaded (get_map called)
-        so we know which rooms to include.
-
-        Args:
-            clean_mode: Optional CleanMode. The default payload has no
-                cleanMode field and always cleans in sweep+mop mode, so
-                any other mode is routed through start_rooms() with every
-                known room (requires the map to be loaded).
-        """
-        self.state.active_zones = []  # whole-house clean clears any zone preview
-        if clean_mode is not None and int(clean_mode) != int(CleanMode.SWEEP_MOP):
-            return await self._start_all_rooms_with_mode(clean_mode)
-        resp = await self.send_command(
-            TOPIC_CMD_START_CLEAN,
-            payload=self._DEFAULT_CLEAN_PAYLOAD,
-            timeout=10.0,
-        )
-        if resp.result_code != CommandResult.NOT_APPLICABLE:
-            return resp
-
-        # Legacy payload rejected — likely newer firmware. Need the room
-        # list from the cached map to build a v2 payload.
-        if not (self.state.map_data and self.state.map_data.rooms):
-            _LOGGER.warning(
-                "start() got NOT_APPLICABLE and no map rooms cached; "
-                "cannot build v2 payload. Call get_map() first."
-            )
-            return resp
-
-        room_ids = [r.room_id for r in self.state.map_data.rooms if r.room_id]
-        if not room_ids:
-            _LOGGER.warning(
-                "start() got NOT_APPLICABLE but cached map has 0 rooms with IDs"
-            )
-            return resp
-
-        _LOGGER.info(
-            "start(): legacy payload rejected, retrying with v2 schema (%d rooms)",
-            len(room_ids),
-        )
-        payload = self._build_clean_payload_v2(room_ids)
-        return await self.send_command(
-            TOPIC_CMD_START_CLEAN, payload=payload, timeout=10.0,
-        )
-
-    async def _start_all_rooms_with_mode(
-        self, clean_mode: CleanMode | int
-    ) -> CommandResponse:
-        """Whole-house clean in a specific (non-default) clean mode.
-
-        The plain whole-house payload has no cleanMode field, so a
-        sweep-only or mop-only clean is sent as a room clean covering
-        every room in the map.
-
-        Raises:
-            NarwalCommandError: If the room list is unavailable (map not
-                loaded and get_map fails) — better than silently starting
-                a sweep+mop clean the user didn't ask for.
-        """
-        if not (self.state.map_data and self.state.map_data.rooms):
-            try:
-                await self.get_map()
-            except Exception:
-                _LOGGER.debug("get_map failed while resolving rooms for clean mode")
-        rooms = self.state.map_data.rooms if self.state.map_data else []
-        room_ids = [r.room_id for r in rooms if r.room_id]
-        if not room_ids:
-            raise NarwalCommandError(
-                f"Cannot start in mode {CleanMode(int(clean_mode)).name}: "
-                "no rooms in cached map"
-            )
-        return await self.start_rooms(room_ids, clean_mode=clean_mode)
-
-    def _build_clean_payload_v2(
-        self,
-        room_ids: list[int],
-        clean_mode: CleanMode | int = CleanMode.SWEEP_MOP,
-        fan: int = 3,
-        strength: int = 1,
-        passes: int = 1,
-    ) -> bytes:
-        """Build clean task payload using the v2 schema (firmware v01.07.22+).
-
-        Observed in issue #36 from a Flow on firmware v01.07.22.00; field
-        semantics decoded as the app proto's CleanParam in upstream PR #49
-        (live-validated on a Flow 2). Each room entry (CleanItem):
-
-            {
-              1: {1: 1, 2: <room_id>},          # nested room ref (ZoneOption)
-              2: {1: <mode>, 2: <fan>,          # CleanParam
-                  3: <strength>, 5|6|7: <passes>},
-              3: <sequence>,                    # 1-indexed
-            }
-
-        CleanParam tag 1 = mode (2=vacuum, 3=mop, 4=vacuum+mop, 5=vacuum-
-        then-mop); tag 2 = fan level (1=MUTE..5=SUPER); tag 3 = mop
-        strength; the pass count goes in the tag matching the mode
-        (5=sweepTime, 6=mopTime, 7=sweepMopSyncTime).
-
-        Outer envelope (CleanTask):
-            {1: {1: 1, 2: [<rooms>], 3: {}, 5: <taskType>}}
-
-        taskType uses the WorkMode enum (1=VACUUM, 2=MOP, 4=VACUUM_AND_MOP).
-
-        NOTE: earlier revisions mislabeled tag 2 as cleanMode and tag 1 as
-        suction — that encoding sent mode=3 (mop-only) for every clean on
-        v2 firmware.
-
-        Args:
-            room_ids: List of room IDs from RoomInfo.room_id.
-            clean_mode: CleanMode for every room. Default sweep+mop.
-            fan: Fan level 1-5. Default 3 (STRONG), as in the #36 capture.
-            strength: Mop scrub strength (1=normal, 2=high).
-            passes: Number of passes. Default 1.
-
-        Returns:
-            Encoded protobuf bytes for clean/plan/start.
-        """
-        import blackboxprotobuf
-
-        mode = CleanMode(int(clean_mode))
-        mode_v2 = CLEAN_MODE_TO_V2[mode]
-        # Pass-count tag depends on mode: 5=sweepTime, 6=mopTime,
-        # 7=sweepMopSyncTime. SWEEP_THEN_MOP (sequential) reuses tag 7 like
-        # the simultaneous mode — the pass tag for the sequential mode is
-        # NOT hardware-verified; the mode itself (tag 1 = 5, taskType = 3)
-        # is what drives vacuum-then-mop behavior.
-        passes_tag = {
-            CleanMode.SWEEP: "5",
-            CleanMode.MOP: "6",
-            CleanMode.SWEEP_MOP: "7",
-            CleanMode.SWEEP_THEN_MOP: "7",
-        }[mode]
-
-        clean_param = {
-            "1": mode_v2,
-            "2": fan,
-            "3": strength,
-            passes_tag: passes,
-        }
-        room_entries = [
-            {
-                "1": {"1": 1, "2": rid},
-                "2": dict(clean_param),
-                "3": idx + 1,
-            }
-            for idx, rid in enumerate(room_ids)
-        ]
-
-        clean_param_typedef = {
-            "type": "message",
-            "message_typedef": {
-                "1": {"type": "int"},
-                "2": {"type": "int"},
-                "3": {"type": "int"},
-                passes_tag: {"type": "int"},
-            },
-        }
-        room_entry_typedef = {
-            "type": "message",
-            "seen_repeated": True,
-            "message_typedef": {
-                "1": {
-                    "type": "message",
-                    "message_typedef": {
-                        "1": {"type": "int"},
-                        "2": {"type": "uint"},
-                    },
-                },
-                "2": clean_param_typedef,
-                "3": {"type": "int"},
-            },
-        }
-
-        msg = {
-            "1": {
-                "1": 1,
-                "2": room_entries if len(room_entries) > 1 else room_entries[0],
-                "3": {},
-                "5": CLEAN_MODE_TO_TASK_TYPE[mode],
-            }
-        }
-        typedef = {
-            "1": {
-                "type": "message",
-                "message_typedef": {
-                    "1": {"type": "int"},
-                    "2": room_entry_typedef,
-                    "3": {"type": "message", "message_typedef": {}},
-                    "5": {"type": "int"},
-                },
-            }
-        }
-        return blackboxprotobuf.encode_message(msg, typedef)
-
-    def _build_room_clean_payload(
-        self,
-        room_ids: list[int],
-        clean_mode: CleanMode | int = CleanMode.SWEEP_MOP,
-    ) -> bytes:
-        """Build CleanTask protobuf with per-room clean params in field 1.2.
-
-        Each room entry in field 1.2 requires full MapCleanParamInfo fields
-        (from APK proto analysis):
-          field 1: roomId (uint32)
-          field 2: cleanMode (int32) — 0=sweep, 1=mop, 2=sweep+mop
-          field 3: cleanTimes (int32) — number of passes
-          field 6: sweepMode (int32) — suction level (3=max)
-          field 7: mopMode (int32) — mop humidity (2=wet)
-
-        A bare roomId without clean params is silently ignored by the robot.
-
-        Args:
-            room_ids: List of room IDs from RoomInfo.room_id.
-            clean_mode: CleanMode for every room. Default sweep+mop.
-
-        Returns:
-            Encoded protobuf bytes for clean/plan/start.
-        """
-        if not room_ids:
-            return self._DEFAULT_CLEAN_PAYLOAD
-
-        import blackboxprotobuf
-
-        # Build per-room entries with default clean settings
-        room_entries = []
-        for rid in room_ids:
-            room_entries.append({
-                "1": rid,                   # roomId
-                "2": int(clean_mode),       # cleanMode
-                "3": 1,                     # cleanTimes = 1 pass
-                "6": 3,                     # sweepMode = max suction
-                "7": 2,                     # mopMode = wet
-            })
-
-        room_typedef = {
-            "type": "message",
-            "seen_repeated": True,
-            "message_typedef": {
-                "1": {"type": "uint"},
-                "2": {"type": "int"},
-                "3": {"type": "int"},
-                "6": {"type": "int"},
-                "7": {"type": "int"},
-            }
-        }
-
-        # Single room: field 1.2 is a message; multiple: repeated message
-        field_2_value = room_entries[0] if len(room_entries) == 1 else room_entries
-
-        msg = {
-            "1": {
-                "2": field_2_value,
-                "5": {
-                    "1": {"1": 3, "2": 2, "3": 1},
-                    "5": {}
-                }
-            }
-        }
-        typedef = {
-            "1": {
-                "type": "message",
-                "message_typedef": {
-                    "2": room_typedef,
-                    "5": {
-                        "type": "message",
-                        "message_typedef": {
-                            "1": {
-                                "type": "message",
-                                "message_typedef": {
-                                    "1": {"type": "int"},
-                                    "2": {"type": "int"},
-                                    "3": {"type": "int"}
-                                }
-                            },
-                            "5": {"type": "message", "message_typedef": {}}
-                        }
-                    }
-                }
-            }
-        }
-        return blackboxprotobuf.encode_message(msg, typedef)
-
-    async def start_rooms(
-        self,
-        room_ids: list[int],
-        clean_mode: CleanMode | int | None = None,
-    ) -> CommandResponse:
-        """Start room-specific cleaning.
-
-        Sends clean/plan/start with the user-selected rooms. Tries the v2
-        nested-room schema first (required by firmware v01.07.22+, and fixes
-        the ack-but-ignore behavior in #37 where legacy schema returns
-        SUCCESS but the robot runs the app shortcut instead of HA-selected
-        rooms). Falls back to legacy flat-room schema on NOT_APPLICABLE
-        for older firmware.
-
-        Args:
-            room_ids: List of room IDs from RoomInfo.room_id.
-            clean_mode: Optional CleanMode (sweep / mop / sweep+mop).
-                Defaults to sweep+mop when not given.
-
-        Returns:
-            CommandResponse with result code from whichever schema landed.
-        """
-        if not room_ids:
-            return await self.start(clean_mode=clean_mode)
-
-        self.state.active_zones = []  # room clean clears any zone preview
-        mode = CleanMode.SWEEP_MOP if clean_mode is None else CleanMode(int(clean_mode))
-        payload_v2 = self._build_clean_payload_v2(room_ids, clean_mode=mode)
-        resp = await self.send_command(
-            TOPIC_CMD_START_CLEAN, payload=payload_v2, timeout=10.0,
-        )
-        if resp.result_code != CommandResult.NOT_APPLICABLE:
-            return resp
-
-        # v2 rejected — try legacy flat-room schema (older firmware)
-        _LOGGER.info(
-            "start_rooms(): v2 payload rejected, retrying with legacy schema (%d rooms)",
-            len(room_ids),
-        )
-        payload_legacy = self._build_room_clean_payload(room_ids, clean_mode=mode)
-        return await self.send_command(
-            TOPIC_CMD_START_CLEAN, payload=payload_legacy, timeout=10.0,
-        )
-
-    # ── Zone (drawn-rectangle) cleaning ──────────────────────────────────
-    # Self-contained: uses clean/start_clean (TOPIC_CMD_START_CLEAN_LEGACY)
-    # with the exact CleanTask shape the robot itself reported after an
-    # app-drawn zone (live-validated on a Flow, fw v01.08.03.07: the robot
-    # accepts an arbitrary rectangle and physically cleans it while docked).
 
     @staticmethod
-    def _zone_coverage(
-        x_min: int, y_min: int, x_max: int, y_max: int, step: int = 2
-    ) -> list[dict]:
-        """Synthesize a boustrophedon coverage path over a rectangle interior.
-
-        ZoneOption field 4 (coverage) is MANDATORY — the robot returns
-        NOT_APPLICABLE without it and does not compute the path itself — but
-        it does NOT validate the path against its own planner, so a serpentine
-        grid of the interior cells is accepted (verified with a fresh
-        rectangle). Adjacent points differ by 1 to mimic a connected walk.
-        """
-        pts: list[dict] = []
-        direction = 1
-        y = y_min + 1
-        while y < y_max:
-            xs = range(x_min + 1, x_max) if direction > 0 else range(x_max - 1, x_min, -1)
-            for x in xs:
-                pts.append({"1": x, "2": y})
-            direction = -direction
-            y += step
-        if not pts:  # degenerate/tiny rectangle — at least one interior point
-            pts.append({"1": (x_min + x_max) // 2, "2": (y_min + y_max) // 2})
-        return pts
-
-    def _build_zone_clean_payload(
-        self,
-        zones: list[tuple[int, int, int, int]],
-        map_id: int,
-        *,
-        clean_mode: CleanMode | int = CleanMode.SWEEP_MOP,
-        fan: int = 2,
-        water: int = 2,
-        mop_strength: int = 1,
-        passes: int = 1,
-    ) -> bytes:
-        """Build a clean/start_clean request for drawn zone rectangles.
-
-        Envelope (byte-exact with the robot's own captured task):
-          CleanTask{1: map_id, 2: [CleanItem], 3: TaskOption{1:1}, 5: taskType}
-          CleanItem{1: ZoneOption{1: 2 (custom zone), 2: idx,
-                                  3: [4 vertices], 4: [coverage path]},
-                    2: CleanParam{1:mode, 2:fan, 3:mop_strength, 4:water,
-                                  7:passes, 8:1, 9:1}, 3: order}
-        CleanParam tag 1 and taskType carry the clean mode (vacuum-then-mop
-        mapping is UNVERIFIED — only vacuum+mop/mode 4 is live-validated).
-        TaskOption must be {1:1} and CleanParam tags 8,9 must be present
-        (both required). Coordinates are map-grid units as plain (non-zigzag)
-        varints.
-
-        Args:
-            zones: Rectangles as (x1, y1, x2, y2) in map-grid coordinates.
-            map_id: Active map id (MapData.map_id, get_map field 2.1).
-            clean_mode: Vacuum / mop / vacuum+mop / vacuum-then-mop.
-            fan/water/mop_strength/passes: CleanParam settings.
-        """
-        import blackboxprotobuf
-
-        mode = CleanMode(int(clean_mode))
-        param = {"1": CLEAN_MODE_TO_V2[mode], "2": int(fan), "3": int(mop_strength),
-                 "4": int(water), "7": int(passes), "8": 1, "9": 1}
-
-        items = []
-        for idx, (x1, y1, x2, y2) in enumerate(zones):
-            x_min, x_max = min(x1, x2), max(x1, x2)
-            y_min, y_max = min(y1, y2), max(y1, y2)
-            vertices = [
-                {"1": x_min, "2": y_max},
-                {"1": x_max, "2": y_max},
-                {"1": x_max, "2": y_min},
-                {"1": x_min, "2": y_min},
-            ]
-            items.append({
-                "1": {"1": 2, "2": idx + 1, "3": vertices,
-                      "4": self._zone_coverage(x_min, y_min, x_max, y_max)},
-                "2": dict(param),
-                "3": idx + 1,
-            })
-        task = {
-            "1": map_id,
-            "2": items if len(items) > 1 else items[0],
-            "3": {"1": 1},  # TaskOption{1:1}
-            "5": CLEAN_MODE_TO_TASK_TYPE[mode],  # taskType from clean mode
-        }
-        point_td = {"type": "message", "seen_repeated": True,
-                    "message_typedef": {"1": {"type": "int"}, "2": {"type": "int"}}}
-        item_typedef = {
-            "type": "message",
-            "seen_repeated": True,
-            "message_typedef": {
-                "1": {"type": "message", "message_typedef": {
-                    "1": {"type": "int"}, "2": {"type": "int"},
-                    "3": point_td, "4": point_td,
-                }},
-                "2": {"type": "message",
-                      "message_typedef": {k: {"type": "int"} for k in param}},
-                "3": {"type": "int"},
+    def _active_request() -> bytes:
+        return encode("ActiveRobotPublish_Request", {
+            "topicsDuration": {
+                "workStatusDuration": 2000,
+                "displayMapDuration": 2000,
+                "robotBaseStatusDuration": 2000,
             },
-        }
-        typedef = {"1": {"type": "message", "message_typedef": {
-            "1": {"type": "int"},
-            "2": item_typedef,
-            "3": {"type": "message", "message_typedef": {"1": {"type": "int"}}},
-            "5": {"type": "int"},
-        }}}
-        return blackboxprotobuf.encode_message({"1": task}, typedef)
+            "publishDuration": 60000,
+        })
 
-    async def start_zone(
-        self,
-        zones: list[tuple[int, int, int, int]],
-        *,
-        clean_mode: CleanMode | int = CleanMode.SWEEP_MOP,
-        fan: int = 2,
-        water: int = 2,
-        mop_strength: int = 1,
-        passes: int = 1,
-    ) -> CommandResponse:
-        """Start cleaning drawn zone rectangles via clean/start_clean.
+    async def notify_active(self) -> None:
+        """Keepalive: re-register as an app client (no reply awaited).
 
-        Requires the robot DOCKED (clean/start_clean is rejected off-dock);
-        retries briefly over the dock-settling transition. Fetches the active
-        map id if not cached.
-
-        Args:
-            zones: Rectangles as (x1, y1, x2, y2) in map-grid coordinates.
-            clean_mode: Vacuum / mop / vacuum+mop / vacuum-then-mop.
-            fan/water/mop_strength/passes: CleanParam settings.
+        Keeps an awake robot pushing status every ~2 s. It does NOT wake a
+        sleeping robot; use wake() for that.
         """
-        if not zones:
-            return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+        try:
+            await self._publish_no_response(TOPIC_CMD_ACTIVE_ROBOT, self._active_request())
+        except Exception:  # noqa: BLE001 - best effort keepalive
+            _LOGGER.debug("active_robot_publish failed", exc_info=True)
 
-        map_data = self.state.map_data
-        if not map_data or not map_data.map_id:
-            map_data = await self.get_map()
-        map_id = map_data.map_id if map_data else 0
-        if not map_id:
-            _LOGGER.warning("start_zone: no active map id; cannot start zone clean")
-            return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+    # ---- status / info -------------------------------------------------
 
-        payload = self._build_zone_clean_payload(
-            zones, map_id, clean_mode=clean_mode, fan=fan, water=water,
-            mop_strength=mop_strength, passes=passes,
+    async def request_status_update(self) -> None:
+        resp = await self.send_command(TOPIC_CMD_GET_BASE_STATUS, retry=False, wake=False)
+        base = resp.message.get("robotBaseStatus")
+        if isinstance(base, dict):
+            self.state.update_base_status(base)
+            self.state.device_reachable = True
+            self._notify_state_update()
+
+    async def fetch_config(self) -> dict[str, Any]:
+        resp = await self.send_command(TOPIC_CMD_GET_CONFIG, retry=False, wake=False)
+        config = resp.message.get("config")
+        if isinstance(config, dict):
+            self.state.config = config
+            self._notify_state_update()
+        return self.state.config
+
+    async def fetch_consumables(self) -> dict[str, list[str]]:
+        resp = await self.send_command(TOPIC_CMD_GET_CONSUMABLE, check=False, retry=False, wake=False)
+        info = resp.message.get("consumableInfo") or {}
+        self.state.consumables_due = {
+            "maintain": [i for i in info.get("maintainItems", []) if isinstance(i, str)],
+            "replace": [i for i in info.get("replaceItems", []) if isinstance(i, str)],
+        }
+        self._notify_state_update()
+        return self.state.consumables_due
+
+    async def fetch_device_info(self) -> None:
+        """Feature flags and firmware version (static; fetch once)."""
+        try:
+            resp = await self.send_command(TOPIC_CMD_GET_FEATURE_LIST, check=False, retry=False, wake=False)
+            self.state.features = {k: v for k, v in resp.message.items() if not k.startswith("#")}
+        except NarwalCommandError:
+            _LOGGER.debug("get_feature_list failed")
+        try:
+            resp = await self.send_command(TOPIC_CMD_GET_FIRMWARE_VERSION, check=False, retry=False, wake=False)
+            text = resp.message.get("firmwareVersionText")
+            if not text:
+                resp = await self.send_command(TOPIC_CMD_GET_DEVICE_INFO, check=False, response_type="", retry=False, wake=False)
+                text = _device_info_version(resp.raw)
+            self.state.firmware_version = (text or "").strip()
+        except NarwalCommandError:
+            _LOGGER.debug("firmware version query failed")
+
+    async def get_map(self, wake: bool = False) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_GET_MAP, timeout=20.0, retry=wake, wake=wake)
+
+    async def fetch_map(self) -> MapSnapshot | None:
+        """Fetch the static map; updates rooms and map geometry in state."""
+        resp = await self.get_map()
+        static = resp.message.get("map")
+        if not isinstance(static, dict):
+            return None
+        self.state.update_rooms_from_map(static)
+        border = static.get("border") or {}
+        grid = static.get("mapData") or b""
+        if not grid or not static.get("width"):
+            return self.state.map
+        snapshot = MapSnapshot(
+            map_id=int(static.get("mapId", 0) or 0),
+            width=int(static["width"]),
+            height=int(static.get("height", 0)),
+            resolution_mm=int(static.get("resolution", 60) or 60),
+            left=int(border.get("left", 0)),
+            bottom=int(border.get("bottom", 0)),
+            grid=grid,
+            rotate_angle=int(static.get("rotateAngle", 0) or 0),
+            station=Pose.from_msg(static.get("station")),
+            robot=Pose.from_msg(static.get("robotPose")),
         )
-        resp = await self._send_start_clean(payload)
-        if resp.result_code == CommandResult.SUCCESS:
-            # Remember the zones so the camera can show where it will clean.
-            self.state.active_zones = [
-                (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
-                for (x1, y1, x2, y2) in zones
-            ]
-        return resp
+        self.state.map = snapshot
+        if snapshot.robot and not self.state.robot_pose:
+            self.state.robot_pose = snapshot.robot
+        self._notify_state_update()
+        return snapshot
 
-    async def _send_start_clean(self, payload: bytes) -> CommandResponse:
-        """Send a clean/start_clean payload, retrying over dock settling.
+    async def fetch_rooms(self) -> None:
+        try:
+            await self.fetch_map()
+        except NarwalCommandError:
+            _LOGGER.warning("Failed to fetch rooms from map")
 
-        clean/start_clean is rejected off-dock, so we retry a few times while
-        the robot is (or is becoming) docked and bail out otherwise.
-        """
-        resp = await self.send_command(
-            TOPIC_CMD_START_CLEAN_LEGACY, payload=payload, timeout=10.0,
-        )
-        for _ in range(3):
-            if resp.result_code == CommandResult.SUCCESS:
-                break
-            if not self.state.is_docked:
-                _LOGGER.warning(
-                    "start_clean: robot not docked (status=%s); clean/start_clean "
-                    "requires the robot on the dock",
-                    self.state.working_status.name,
-                )
-                break
-            _LOGGER.info("start_clean: retrying (dock settling)")
-            await asyncio.sleep(3.0)
-            resp = await self.send_command(
-                TOPIC_CMD_START_CLEAN_LEGACY, payload=payload, timeout=10.0,
-            )
-        return resp
+    # ---- control -------------------------------------------------------
 
-    def _build_whole_clean_payload(
-        self,
-        map_id: int,
-        *,
-        clean_mode: CleanMode | int = CleanMode.SWEEP_MOP,
-        fan: int = 2,
-        water: int = 2,
-        mop_strength: int = 1,
-        passes: int = 1,
-    ) -> bytes:
-        """Build a clean/start_clean request for the whole map in a mode.
-
-        Same CleanTask envelope as the zone payload, but a single CleanItem
-        with ZoneOption type 3 (whole map) and no vertices/coverage — the
-        robot already knows the map geometry. CleanParam tag 1 + taskType
-        carry the mode.
-
-        UNVERIFIED: ZoneOption type 3 (whole) is documented by the robot's
-        own task echo (1=room, 2=zone, 3=whole) but not yet live-tested;
-        vacuum.start falls back to the legacy path if the robot rejects it.
-        """
-        import blackboxprotobuf
-
-        mode = CleanMode(int(clean_mode))
-        param = {"1": CLEAN_MODE_TO_V2[mode], "2": int(fan), "3": int(mop_strength),
-                 "4": int(water), "7": int(passes), "8": 1, "9": 1}
-        item = {"1": {"1": 3, "2": 1}, "2": param, "3": 1}
-        task = {
-            "1": map_id,
-            "2": item,
-            "3": {"1": 1},
-            "5": CLEAN_MODE_TO_TASK_TYPE[mode],
-        }
-        item_typedef = {
-            "type": "message",
-            "message_typedef": {
-                "1": {"type": "message", "message_typedef": {
-                    "1": {"type": "int"}, "2": {"type": "int"},
-                }},
-                "2": {"type": "message",
-                      "message_typedef": {k: {"type": "int"} for k in param}},
-                "3": {"type": "int"},
-            },
-        }
-        typedef = {"1": {"type": "message", "message_typedef": {
-            "1": {"type": "int"},
-            "2": item_typedef,
-            "3": {"type": "message", "message_typedef": {"1": {"type": "int"}}},
-            "5": {"type": "int"},
-        }}}
-        return blackboxprotobuf.encode_message({"1": task}, typedef)
-
-    async def start_clean_whole(
-        self,
-        *,
-        clean_mode: CleanMode | int = CleanMode.SWEEP_MOP,
-    ) -> CommandResponse:
-        """Clean the whole map in a specific mode via clean/start_clean.
-
-        Requires the robot docked. Returns the robot's response so callers
-        can fall back to the legacy start() path on NOT_APPLICABLE.
-        """
-        self.state.active_zones = []  # whole-house clean clears any zone preview
-        map_data = self.state.map_data
-        if not map_data or not map_data.map_id:
-            map_data = await self.get_map()
-        map_id = map_data.map_id if map_data else 0
-        if not map_id:
-            _LOGGER.warning("start_clean_whole: no active map id")
-            return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
-
-        payload = self._build_whole_clean_payload(map_id, clean_mode=clean_mode)
-        return await self._send_start_clean(payload)
-
-    def _build_room_startclean_payload(
-        self,
-        room_ids: list[int],
-        map_id: int,
-        *,
-        clean_mode: CleanMode | int = CleanMode.SWEEP_MOP,
-        fan: int = 2,
-        water: int = 2,
-        mop_strength: int = 1,
-        passes: int = 1,
-    ) -> bytes:
-        """Build a clean/start_clean request for specific rooms in a mode.
-
-        Same CleanTask envelope as the zone/whole payloads, one CleanItem per
-        room with ZoneOption type 1 (room) carrying the room_id in field 2 —
-        no vertices/coverage (the robot knows room geometry). CleanParam tag 1
-        + taskType carry the mode.
-
-        UNVERIFIED: ZoneOption type 1 (room) is from the robot's task echo
-        (1=room, 2=zone, 3=whole) but not yet live-tested; callers get the
-        robot's result code so they can fall back.
-        """
-        import blackboxprotobuf
-
-        mode = CleanMode(int(clean_mode))
-        param = {"1": CLEAN_MODE_TO_V2[mode], "2": int(fan), "3": int(mop_strength),
-                 "4": int(water), "7": int(passes), "8": 1, "9": 1}
-        items = [
-            {"1": {"1": 1, "2": int(rid)}, "2": dict(param), "3": idx + 1}
-            for idx, rid in enumerate(room_ids)
-        ]
-        task = {
-            "1": map_id,
-            "2": items if len(items) > 1 else items[0],
-            "3": {"1": 1},
-            "5": CLEAN_MODE_TO_TASK_TYPE[mode],
-        }
-        item_typedef = {
-            "type": "message",
-            "seen_repeated": True,
-            "message_typedef": {
-                "1": {"type": "message", "message_typedef": {
-                    "1": {"type": "int"}, "2": {"type": "int"},
-                }},
-                "2": {"type": "message",
-                      "message_typedef": {k: {"type": "int"} for k in param}},
-                "3": {"type": "int"},
-            },
-        }
-        typedef = {"1": {"type": "message", "message_typedef": {
-            "1": {"type": "int"},
-            "2": item_typedef,
-            "3": {"type": "message", "message_typedef": {"1": {"type": "int"}}},
-            "5": {"type": "int"},
-        }}}
-        return blackboxprotobuf.encode_message({"1": task}, typedef)
-
-    async def start_clean_rooms(
-        self,
-        room_ids: list[int],
-        *,
-        clean_mode: CleanMode | int = CleanMode.SWEEP_MOP,
-    ) -> CommandResponse:
-        """Clean specific rooms in a mode via clean/start_clean.
-
-        Requires the robot docked. Returns the robot's response so callers can
-        fall back to the legacy start_rooms() path on NOT_APPLICABLE.
-        """
-        if not room_ids:
-            return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
-
-        self.state.active_zones = []  # room clean clears any zone preview
-        map_data = self.state.map_data
-        if not map_data or not map_data.map_id:
-            map_data = await self.get_map()
-        map_id = map_data.map_id if map_data else 0
-        if not map_id:
-            _LOGGER.warning("start_clean_rooms: no active map id")
-            return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
-
-        payload = self._build_room_startclean_payload(
-            room_ids, map_id, clean_mode=clean_mode
-        )
-        return await self._send_start_clean(payload)
-
-    async def start_easy_clean(self) -> CommandResponse:
-        """Start quick/easy clean."""
-        return await self.send_command(TOPIC_CMD_EASY_CLEAN)
+    async def locate(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_YELL)
 
     async def pause(self) -> CommandResponse:
-        """Pause current task."""
         return await self.send_command(TOPIC_CMD_PAUSE)
 
-    async def resume(self, timeout: float = COMMAND_RESPONSE_TIMEOUT) -> CommandResponse:
-        """Resume paused task."""
-        return await self.send_command(TOPIC_CMD_RESUME, timeout=timeout)
+    async def resume(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_RESUME)
 
-    async def stop(self, timeout: float = 15.0) -> CommandResponse:
-        """Force-stop current task.
+    async def stop(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_FORCE_END)
 
-        Note: force_end is slow — robot physically stops before responding.
-        Previous testing shows 10-15s response times from CLEANING state.
-        """
-        self.state.active_zones = []
-        return await self.send_command(TOPIC_CMD_FORCE_END, timeout=timeout)
-
-    async def cancel(self) -> CommandResponse:
-        """Cancel current task."""
-        self.state.active_zones = []
-        return await self.send_command(TOPIC_CMD_CANCEL)
-
-    async def return_to_base(self, timeout: float = COMMAND_RESPONSE_TIMEOUT) -> CommandResponse:
-        """Return to charging dock."""
-        self.state.active_zones = []
-        return await self.send_command(TOPIC_CMD_RECALL, timeout=timeout)
-
-    async def set_fan_speed(self, level: FanLevel | int) -> CommandResponse:
-        """Set suction fan speed.
-
-        Args:
-            level: FanLevel enum or int (0=quiet, 1=normal, 2=strong, 3=max).
-        """
-        payload = b"\x08" + bytes([int(level) & 0x7F])
-        return await self.send_command(TOPIC_CMD_SET_FAN_LEVEL, payload)
-
-    async def set_mop_humidity(self, level: MopHumidity | int) -> CommandResponse:
-        """Set mop wetness level.
-
-        Args:
-            level: MopHumidity enum or int (0=dry, 1=normal, 2=wet).
-        """
-        payload = b"\x08" + bytes([int(level) & 0x7F])
-        return await self.send_command(TOPIC_CMD_SET_MOP_HUMIDITY, payload)
+    async def return_to_base(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_RECALL)
 
     async def wash_mop(self) -> CommandResponse:
-        """Wash the mop pads at the station."""
         return await self.send_command(TOPIC_CMD_WASH_MOP)
 
     async def dry_mop(self) -> CommandResponse:
-        """Dry the mop pads at the station."""
         return await self.send_command(TOPIC_CMD_DRY_MOP)
 
+    async def wash_and_dry_mop(self) -> CommandResponse:
+        return await self.send_command(TOPIC_CMD_WASH_AND_DRY_MOP)
+
     async def empty_dustbin(self) -> CommandResponse:
-        """Empty the dustbin at the station."""
         return await self.send_command(TOPIC_CMD_DUST_GATHERING)
 
-    # --- Query commands ---
-
-    async def get_device_info(self) -> DeviceInfo:
-        """Query device identity (product key, device ID, firmware)."""
-        resp = await self.send_command(TOPIC_CMD_GET_DEVICE_INFO)
-        data = resp.data
-
-        def _clean_bytes(val: Any) -> str:
-            if isinstance(val, bytes):
-                return val.decode("utf-8", errors="replace").rstrip("\n")
-            s = str(val)
-            if s.startswith("b'") and s.endswith("'"):
-                s = s[2:-1]
-            return s.rstrip("\n")
-
-        info = DeviceInfo(
-            product_key=_clean_bytes(data.get("1", "")),
-            device_id=_clean_bytes(data.get("2", "")),
-            firmware_version=_clean_bytes(data.get("3", "")),
-        )
-        self.state.device_info = info
-
-        # Update topic prefix to match this device's product key
-        if info.product_key:
-            self.topic_prefix = f"/{info.product_key}"
-            _LOGGER.info("Topic prefix set to %s", self.topic_prefix)
-
-        return info
-
-    async def get_feature_list(self) -> dict[int, int]:
-        """Query supported features. Returns {feature_id: value}."""
-        resp = await self.send_command(TOPIC_CMD_GET_FEATURE_LIST)
-        return {int(k): int(v) for k, v in resp.data.items()}
-
-    async def get_status(self, full_update: bool = True) -> CommandResponse:
-        """Query current device base status.
-
-        Args:
-            full_update: If True, update all state fields (working_status,
-                battery, etc). If False, only update hardware-sampled fields
-                (battery, health) — used when robot is not broadcasting and
-                working_status in the response may be stale.
-        """
-        resp = await self.send_command(TOPIC_CMD_GET_BASE_STATUS)
-        status_data = resp.data.get("2", {})
-        if status_data:
-            _LOGGER.debug(
-                "get_status response (full=%s): field3=%r, field2=%r",
-                full_update,
-                status_data.get("3") if isinstance(status_data, dict) else None,
-                status_data.get("2") if isinstance(status_data, dict) else None,
-            )
-            if full_update:
-                self.state.update_from_base_status(status_data)
-            else:
-                self.state.update_battery_from_base_status(status_data)
-        else:
-            _LOGGER.debug("get_status response has no field 2; keys: %s", list(resp.data.keys()))
+    async def set_fan_speed(self, level: FanLevel) -> CommandResponse | None:
+        """Change suction. The robot only accepts this during a clean, so
+        while docked the choice is remembered and sent with the next clean."""
+        self.state.preferred_fan_level = level
+        resp = None
+        if self.state.is_cleaning:
+            request = encode("SetFanLevel_Request", {
+                "level": level.value, "operationType": "OPERATION_TYPE_SET_VALUE",
+            })
+            resp = await self.send_command(TOPIC_CMD_SET_FAN_LEVEL, request)
+            self.state.base["fanLevel"] = {v: k for k, v in _FAN_LABELS.items()}[level]
+        self._notify_state_update()
         return resp
 
-    async def get_current_task(self) -> CommandResponse:
-        """Query the current clean task."""
-        return await self.send_command(TOPIC_CMD_GET_CURRENT_TASK)
+    async def set_mop_humidity(self, level: MopHumidity) -> CommandResponse | None:
+        """Change mop wetness; same docked/cleaning behaviour as suction."""
+        self.state.preferred_mop_humidity = level
+        resp = None
+        if self.state.is_cleaning:
+            request = encode("SetMopHumidity_Request", {
+                "mopHumidity": level.value, "operationType": "OPERATION_TYPE_SET_VALUE",
+            })
+            resp = await self.send_command(TOPIC_CMD_SET_MOP_HUMIDITY, request)
+            self.state.base["mopHumidity"] = f"MOP_HUMIDITY_{level.name}"
+        self._notify_state_update()
+        return resp
 
-    async def get_map(self) -> MapData:
-        """Download the full map data."""
-        resp = await self.send_command(TOPIC_CMD_GET_MAP, timeout=15.0)
-        product_key = ""
-        if self.state.device_info and self.state.device_info.product_key:
-            product_key = self.state.device_info.product_key
-        map_data = MapData.from_response(resp.data, product_key=product_key)
-        self.state.map_data = map_data
-        return map_data
+    async def set_config(self, **values: Any) -> CommandResponse:
+        """Change robot settings, e.g. ``set_config(childLockEnabled=True)``.
 
-    async def get_all_maps(self) -> CommandResponse:
-        """Download all saved/reduced maps."""
-        return await self.send_command(TOPIC_CMD_GET_ALL_MAPS, timeout=15.0)
-
-    async def take_picture(self) -> bytes | None:
-        """Capture a photo from the robot's camera.
-
-        Returns raw image bytes from field 2 of the response, or None on failure.
-        Note: the image is AES-encrypted; decoding requires the APK-derived key
-        which is not yet known. Callers receive raw bytes as-is.
+        Field names are SetConfig_Request's; on success the cached GetConfig
+        values are refreshed from the robot.
         """
+        request = encode("SetConfig_Request", values)
+        resp = await self.send_command(TOPIC_CMD_SET_CONFIG, request)
         try:
-            resp = await self.send_command(TOPIC_CMD_TAKE_PICTURE, timeout=15.0)
-        except Exception:
-            _LOGGER.warning("take_picture command failed")
-            return None
-        if resp.result_code == CommandResult.SUCCESS:
-            return resp.data.get("2")
-        _LOGGER.warning("take_picture returned result_code=%d", resp.result_code)
-        return None
+            await self.fetch_config()
+        except NarwalCommandError:
+            self.state.config.update(values)
+            self._notify_state_update()
+        return resp
 
-    async def set_led(self, on: bool) -> None:
-        """Turn the camera LED fill light on or off.
+    async def reset_consumable(self, replace_item: str) -> CommandResponse:
+        request = encode("ResetConsumableInfo_Request", {
+            "consumableInfo": {"replaceItems": [replace_item]},
+        })
+        resp = await self.send_command(
+            TOPIC_CMD_RESET_CONSUMABLE, request,
+            response_type="ResetConsumableInfo_Response", check=False,
+        )
+        await self.fetch_consumables()
+        return resp
 
-        Payload: 0x08 0x01 = on, 0x08 0x00 = off (protobuf field 1, varint).
-        """
-        payload = b"\x08\x01" if on else b"\x08\x00"
+    def build_clean_request(
+        self,
+        room_ids: list[int],
+        mode: CleanMode = CleanMode.VACUUM_AND_MOP,
+        fan_level: FanLevel | None = None,
+        mop_humidity: MopHumidity | None = None,
+        passes: int = 1,
+    ) -> bytes:
+        """Encode a StartClean_Request: one CleanItem per room, in order."""
+        fan = fan_level or self.state.fan_level or FanLevel.NORMAL
+        mop = mop_humidity or self.state.mop_humidity or MopHumidity.NORMAL
+        vacuum = mode in (CleanMode.VACUUM_ONLY, CleanMode.VACUUM_AND_MOP, CleanMode.VACUUM_THEN_MOP)
+        mopping = mode in (CleanMode.MOP_ONLY, CleanMode.VACUUM_AND_MOP, CleanMode.VACUUM_THEN_MOP)
+        # Passes go in the field matching the mode (CleanTask.CleanParam).
+        times: dict[str, int] = {
+            CleanMode.VACUUM_ONLY: {"sweepTime": passes},
+            CleanMode.MOP_ONLY: {"mopTime": passes},
+            CleanMode.VACUUM_AND_MOP: {"sweepMopSyncTime": passes},
+            CleanMode.VACUUM_THEN_MOP: {"sweepTime": passes, "mopTime": passes},
+        }[mode]
+        items = []
+        for order, room_id in enumerate(room_ids, start=1):
+            items.append({
+                "zone": {"zoneType": "ZONE_TYPE_ROOM", "zoneId": room_id},
+                "param": {
+                    "mode": CLEAN_MODE_LABEL[mode],
+                    "fanLevel": fan.value if vacuum else None,
+                    "mopHumidity": mop.value if mopping else None,
+                    **times,
+                },
+                "order": order,
+            })
+        task: dict[str, Any] = {"items": items, "taskType": CLEAN_MODE_TASK_TYPE[mode]}
+        # The robot rejects a clean task without a map id (seen live). Prefer
+        # the loaded map's id, else the one the robot reports in its status.
+        map_id = self.state.current_map_id
+        if map_id:
+            task["mapId"] = map_id
+        return encode("StartClean_Request", {"task": task})
+
+    async def start_clean(
+        self,
+        room_ids: list[int] | None = None,
+        mode: CleanMode = CleanMode.VACUUM_AND_MOP,
+        fan_level: FanLevel | None = None,
+        mop_humidity: MopHumidity | None = None,
+        passes: int = 1,
+    ) -> CommandResponse:
+        """Start cleaning the given rooms (all known rooms if none given)."""
+        if self.probably_asleep():
+            await self.wake()
+        if self.state.map is None or not self.state.rooms:
+            # Map not loaded yet (e.g. the robot was asleep at startup): load it
+            # now that the robot is awake, for room ids and the map id.
+            await self.fetch_rooms()
+        if not room_ids:
+            room_ids = [
+                r.room_id for r in self.state.rooms
+                if r.room_id not in self.state.no_go_room_ids
+            ]
+        if not room_ids:
+            raise NarwalCommandError("Cannot start: no rooms known yet (map not loaded)")
+        request = self.build_clean_request(room_ids, mode, fan_level, mop_humidity, passes)
+        return await self.send_command(TOPIC_CMD_START_CLEAN, request)
+
+    # ------------------------------------------------------------------
+    # Teardown / discovery
+    # ------------------------------------------------------------------
+
+    async def disconnect(self) -> None:
+        """Disconnect without flipping availability (planned reconnect/unload)."""
+        client = self._client
+        self._client = None
+        self._connected.clear()
+        if client:
+            client.on_connect = None
+            client.on_message = None
+            client.on_disconnect = None
+            client.on_subscribe = None
+            loop = asyncio.get_running_loop()
+            try:
+                await asyncio.wait_for(
+                    loop.run_in_executor(None, self._stop_mqtt_client, client), timeout=5.0,
+                )
+            except TimeoutError:
+                _LOGGER.warning("MQTT disconnect timed out — forcing cleanup")
+                try:
+                    client.loop_stop()
+                except Exception:  # noqa: BLE001
+                    pass
+
+    @staticmethod
+    def _stop_mqtt_client(client: mqtt.Client) -> None:
         try:
-            resp = await self.send_command(TOPIC_CMD_SET_LED, payload=payload)
-        except Exception:
-            _LOGGER.warning("set_led(%s) command failed", on)
-            return
-        if resp.result_code not in (CommandResult.SUCCESS, CommandResult.NOT_APPLICABLE):
-            _LOGGER.warning(
-                "set_led(%s) unexpected result_code=%d", on, resp.result_code
-            )
+            client.disconnect()
+        except Exception:  # noqa: BLE001
+            pass
+        client.loop_stop()
+
+    @staticmethod
+    def discover_devices_via_mqtt(
+        product_key: str,
+        user_uuid: str,
+        mqtt_password: str,
+        broker: str,
+        port: int = MQTT_PORT,
+        timeout: float = 10.0,
+    ) -> list[str]:
+        """Listen on /{product_key}/+/# and return device names seen (blocking)."""
+        discovered: list[str] = []
+        found_event = threading.Event()
+        client = mqtt.Client(
+            client_id=f"app_{user_uuid}_{uuid.uuid4()}",
+            protocol=mqtt.MQTTv5,
+            callback_api_version=mqtt.CallbackAPIVersion.VERSION2,
+        )
+        client.username_pw_set(user_uuid, mqtt_password)
+        client.tls_set_context(ssl.create_default_context())
+
+        def on_connect(cl, ud, flags, rc, props=None):
+            if str(rc) == "Success" or rc == 0:
+                cl.subscribe(f"/{product_key}/+/#", qos=1)
+
+        def on_message(cl, ud, msg):
+            parts = msg.topic.split("/")
+            if len(parts) >= 3 and parts[1] == product_key and parts[2] not in discovered:
+                discovered.append(parts[2])
+                found_event.set()
+
+        client.on_connect = on_connect
+        client.on_message = on_message
+        try:
+            client.connect(broker, port, keepalive=30)
+            client.loop_start()
+            found_event.wait(timeout=timeout)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("MQTT discovery failed", exc_info=True)
+        finally:
+            client.loop_stop()
+            client.disconnect()
+        return discovered
+
+
+_FAN_LABELS = {
+    "FAN_LEVEL_MUTE": FanLevel.QUIET,
+    "FAN_LEVEL_NORMAL": FanLevel.NORMAL,
+    "FAN_LEVEL_STRONG": FanLevel.STRONG,
+    "FAN_LEVEL_DEEP": FanLevel.DEEP,
+    "FAN_LEVEL_SUPER": FanLevel.MAX,
+}
+
+
+def _device_info_version(body: bytes) -> str:
+    """common/get_device_info reply: field 3 holds the firmware text."""
+    from .proto import iter_fields
+
+    try:
+        for num, wire, value in iter_fields(body):
+            if num == 3 and wire == 2:
+                return value.decode(errors="replace")
+    except ProtoError:
+        pass
+    return ""

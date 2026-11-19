@@ -1,156 +1,70 @@
-"""Constants for the Narwal vacuum integration."""
+"""Constants for the Narwal integration."""
 
 from homeassistant.const import Platform
 
-from .narwal_client import CleanMode, FanLevel
+from .narwal_client.const import CleanMode, FanLevel, MopHumidity
 
 DOMAIN = "narwal"
-DEFAULT_PORT = 9002
 
-MANUFACTURER = "Narwal"
-MODEL = "Flow (AX12)"
-
-# Model selector for config flow.
-# Keys are user-facing labels; values are product key prefixes.
-# "auto" cycles all known keys during discovery (slower, fallback).
-# CN-market names included — mapping from the CN app's config_list.json.
-NARWAL_MODELS: dict[str, str] = {
-    "云鲸逍遥001 / Narwal Flow (CX1)": "hEA7OEshlx",
-    "云鲸逍遥002 / Narwal Flow 2 (X30)": "QxMSPG6VSO",
-    "云鲸逍遥002 Max / Freo Z Ultra (CX7)": "BYWBPqSxeC",
-    "云鲸 J5 (AX8)": "Uuug39n0fD",
-    "云鲸 J4 / J4 Pure": "EHf6cRNRGT",
-    "云鲸 J4 Lite": "6NjIDYxBXb",
-    "云鲸 J3": "AX3",
-    "Narwal Freo 20 (J64)": "fjhpiem4ba",
-    "Narwal Freo 20 Edge (R32)": "ulonq49mm1",
-    "Narwal Freo Z10 Ultra (CX4)": "DrzDKQ0MU8",
-    "Narwal Freo Z10 Pro / Turbo (AX26)": "qV6BujoYLz",
-    "Narwal Freo X10 Pro (AX15)": "CNbforyZWI",
-    "Narwal Freo X Ultra (AX18, 仅云端)": "LnugwMG9ss",
-    "其他 / Other / Auto-detect": "auto",
-}
-
-CONF_MODEL = "model"
-CONF_PRODUCT_KEY = "product_key"
-
-# Options
-CONF_MAP_SCALE = "map_scale"
-DEFAULT_MAP_SCALE = 4
-MIN_MAP_SCALE = 2
-MAX_MAP_SCALE = 6
-
-PLATFORMS: list[Platform] = [
+PLATFORMS = [
     Platform.VACUUM,
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
+    Platform.CAMERA,
     Platform.SELECT,
     Platform.SWITCH,
-    Platform.CAMERA,
+    Platform.NUMBER,
 ]
 
+# Config entry data keys
+CONF_EMAIL = "email"
+CONF_PASSWORD = "password"
+CONF_AREA_CODE = "area_code"
+CONF_REGION = "region"
+CONF_PRODUCT_KEY = "product_key"
+CONF_DEVICE_NAME = "device_name"
+CONF_USER_UUID = "user_uuid"
+CONF_ACCESS_TOKEN = "access_token"
+CONF_REFRESH_TOKEN = "refresh_token"
+
+# Legacy keys (kept for migration from manual config)
+CONF_MQTT_USERNAME = "mqtt_username"
+CONF_MQTT_PASSWORD = "mqtt_password"
+CONF_MQTT_CLIENT_ID = "mqtt_client_id"
+
+# Cached room list so start_clean works while the vacuum sleeps.
+CONF_ROOMS_CACHE = "rooms_cache"
+
+REGION_OPTIONS = {
+    "us": "United States",
+    "il": "Israel",
+    "eu": "Europe",
+    "cn": "China",
+}
+
+# Fan speed names shown in HA (order = app order).
 FAN_SPEED_MAP: dict[str, FanLevel] = {
-    "quiet": FanLevel.QUIET,
-    "normal": FanLevel.NORMAL,
-    "strong": FanLevel.STRONG,
-    "max": FanLevel.MAX,
+    "Quiet": FanLevel.QUIET,
+    "Normal": FanLevel.NORMAL,
+    "Strong": FanLevel.STRONG,
+    "Max": FanLevel.MAX,
 }
+FAN_SPEED_LIST = list(FAN_SPEED_MAP)
+FAN_SPEED_REVERSE = {v: k for k, v in FAN_SPEED_MAP.items()}
 
-FAN_SPEED_LIST: list[str] = list(FAN_SPEED_MAP.keys())
-
+# Clean mode names are also used by the Lovelace card and send_command.
 CLEAN_MODE_MAP: dict[str, CleanMode] = {
-    "sweep": CleanMode.SWEEP,
-    "mop": CleanMode.MOP,
-    "sweep_mop": CleanMode.SWEEP_MOP,
-    "sweep_then_mop": CleanMode.SWEEP_THEN_MOP,
+    "Vacuum & Mop": CleanMode.VACUUM_AND_MOP,
+    "Vacuum then Mop": CleanMode.VACUUM_THEN_MOP,
+    "Vacuum Only": CleanMode.VACUUM_ONLY,
+    "Mop Only": CleanMode.MOP_ONLY,
 }
+CLEAN_MODE_LIST = list(CLEAN_MODE_MAP)
+CLEAN_MODE_REVERSE = {v: k for k, v in CLEAN_MODE_MAP.items()}
 
-CLEAN_MODE_LIST: list[str] = list(CLEAN_MODE_MAP.keys())
-
-DEFAULT_CLEAN_MODE = "sweep_mop"
-
-# Known fault codes reported by the robot, mapped to translation slugs
-# (entity.sensor.error.state.<slug> in strings.json / translations/).
-# Source: Narwal's official help center (help.narwal.com/helpcenter/vall,
-# lang packs key articles by the zero-padded hex of this 32-bit code; the
-# 4-digit number in the comment is the code the Narwal app shows).
-# Structure: byte1 = actor (0x01 station, 0x02 robot), byte2 = subsystem
-# (0x01 water, 0x02 mechanics, 0x03 power, 0x10 nav, 0x11 robot-station,
-# 0x13 zones, 0x31 sensors). Unknown codes fall through to the raw number.
-ERROR_CODE_SLUGS: dict[int, str] = {
-    0x01010013: "base_station_overflow",  # 2003
-    0x01010032: "cleaning_tray_not_in_place",  # 2004
-    0x01010034: "clean_water_tank_not_in_place",  # 2005
-    0x01010035: "clean_water_tank_error",  # 2006 water outlet error
-    0x01010036: "dirty_water_tank_full_or_missing",  # 2007
-    0x01010051: "water_exchange_clean_tank_error",  # 3000
-    0x01010052: "water_exchange_module_error",  # 3001
-    0x01010053: "base_station_overflow",  # 3002
-    0x01010059: "water_exchange_module_not_installed",  # 3010
-    0x01010060: "water_control_module_not_detected",  # 3004
-    0x01010061: "water_spray_error",  # 3005
-    0x01010063: "dirty_water_pipe_error",  # 3007-3008
-    0x01010137: "clean_water_tank_empty",  # live-observed (StratoGh0st99)
-    0x02020011: "roller_brush_lifting_error",  # 1007-1008
-    0x02020013: "mop_lifting_error",  # 1009-1010
-    0x02020015: "mop_motor_overcurrent",  # 1122
-    0x02020028: "side_brush_error",  # 1041-1043
-    # Live-observed 2026-08-22; no help-center article for this code.
-    # Firmware message 扫地时右边刷异常 = right side brush fault while sweeping.
-    0x02020030: "side_brush_error",
-    0x02020031: "roller_brush_entangled",  # 1044
-    0x02020032: "dust_bin_not_in_place",  # 1045
-    0x02020040: "mopping_module_error",  # 1036-1038
-    0x02020050: "mopping_module_error",  # 1030-1032
-    0x02020060: "mopping_module_error",  # 1033-1035
-    0x02030040: "battery_temp_high",  # 1005
-    0x02030041: "battery_temp_low",  # 1006
-    0x02030050: "charging_pads_error",  # 1020-1021
-    0x02030051: "charging_error",  # 1130-1131
-    0x02100015: "return_to_base_failed",  # 1127
-    0x02100017: "base_station_not_found",  # 1022
-    0x02100018: "base_station_not_found",  # 1023
-    0x02100019: "repositioning_failed",  # 1011
-    0x02100021: "robot_trapped",  # 1012, 1123-1126
-    0x02100051: "exit_base_failed",  # 1024-1025
-    0x02100070: "exit_base_failed",  # 1128
-    0x02110020: "base_connection_failed",  # 1026
-    0x02110030: "mop_washing_interrupted",  # 1028
-    0x02110040: "mop_drying_interrupted",  # 1039 (live: left dock >5 min)
-    # Live-observed 2026-09-20; no help-center article for this code.
-    # Firmware message 电机冷却阶段无法开启任务 = cannot start a task while the
-    # motor is in its cooldown phase. Severity: Error; does not trigger a
-    # return-to-base.
-    0x02110096: "motor_cooling_down",
-    0x02130020: "entered_no_go_zone",  # 1013
-    0x02310025: "wheel_malfunction",  # 1014-1016
-    # Live-observed 2026-09-20; no help-center article for this code.
-    # Firmware message 左后驱轮卡住 = rear left drive wheel stuck.
-    0x02310026: "rear_left_wheel_stuck",
-    # Live-observed 2026-09-20; no help-center article for this code.
-    # Firmware message 右后驱轮卡住 = rear right drive wheel stuck.
-    0x02310027: "rear_right_wheel_stuck",
-    0x02310031: "robot_lifted",  # 1017 (live: stuck on a doormat)
-    # Live-observed 2026-09-20; no help-center article for this code.
-    # Firmware message 左后驱轮过流达到阈值需要重启 = rear left drive wheel
-    # overcurrent threshold reached, restart required. Severity: Fatal;
-    # triggers an automatic return-to-base.
-    0x02310034: "rear_left_wheel_overcurrent",
-    0x02310100: "lidar_speed_error",  # 1047
-    0x02310101: "lidar_cover_error",  # 1048
-    0x02310110: "imu_error",  # 1065-1066
-    0x02310118: "front_infrared_error",  # 1073-1080
-    0x02310120: "front_ground_sensor_error",  # 1081
-    0x02310128: "cliff_sensor_error",  # 1089-1092
-    0x02310130: "wall_sensor_error",  # 1097 wall PSD
-    0x02310138: "ultrasonic_sensor_error",  # 1105 ground material
-    0x02310140: "bumper_error",  # 1113
+MOP_HUMIDITY_MAP: dict[str, MopHumidity] = {
+    "dry": MopHumidity.DRY,
+    "normal": MopHumidity.NORMAL,
+    "wet": MopHumidity.WET,
 }
-
-# Deep link to the help-center article for a fault; {code} is the
-# zero-padded 8-digit hex of the fault code (articles are keyed by it).
-ERROR_HELP_URL_TEMPLATE = (
-    "https://help.narwal.com/helpcenter/vall/#/p2/question/all"
-    "?eType=1&code={code}&lang=en-US"
-)

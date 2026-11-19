@@ -1,56 +1,45 @@
-"""Switch entities for Narwal vacuum — map layer visibility toggles."""
+"""Switch entities for Narwal robot settings."""
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import NarwalConfigEntry
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
 
-_LOGGER = logging.getLogger(__name__)
-
 
 @dataclass(frozen=True, kw_only=True)
-class NarwalLayerSwitchDescription(SwitchEntityDescription):
-    """Describes a map layer visibility switch."""
-
-    # Name of the boolean flag on the coordinator this switch controls
-    flag: str
+class NarwalSwitchDescription(SwitchEntityDescription):
+    # Same field name in GetConfig (read) and SetConfig (write).
+    config_key: str
 
 
-SWITCH_DESCRIPTIONS: tuple[NarwalLayerSwitchDescription, ...] = (
-    NarwalLayerSwitchDescription(
-        key="draw_trail",
-        translation_key="draw_trail",
-        icon="mdi:chart-line-variant",
-        flag="draw_trail",
-    ),
-    NarwalLayerSwitchDescription(
-        key="draw_cleaned_area",
-        translation_key="draw_cleaned_area",
-        icon="mdi:broom",
-        flag="draw_cleaned_area",
-    ),
-    NarwalLayerSwitchDescription(
-        key="draw_furniture",
-        translation_key="draw_furniture",
-        icon="mdi:sofa-outline",
-        flag="draw_furniture",
-    ),
-    NarwalLayerSwitchDescription(
-        key="draw_lidar_walls",
-        translation_key="draw_lidar_walls",
-        icon="mdi:wall",
-        flag="draw_lidar_walls",
-    ),
+SWITCHES: tuple[NarwalSwitchDescription, ...] = (
+    NarwalSwitchDescription(key="child_lock", translation_key="child_lock",
+                            config_key="childLockEnabled", icon="mdi:lock"),
+    NarwalSwitchDescription(key="auto_empty", translation_key="auto_empty",
+                            config_key="dustGatheringEnabled", icon="mdi:delete-restore"),
+    NarwalSwitchDescription(key="quiet_auto_empty", translation_key="quiet_auto_empty",
+                            config_key="quietDustGatheringEnabled", icon="mdi:volume-low"),
+    NarwalSwitchDescription(key="auto_detergent", translation_key="auto_detergent",
+                            config_key="autoAddDetergentEnabled", icon="mdi:bottle-tonic-plus"),
+    NarwalSwitchDescription(key="carpet_boost", translation_key="carpet_boost",
+                            config_key="cleanCarpetEnabled", icon="mdi:rug"),
+    NarwalSwitchDescription(key="pet_mode", translation_key="pet_mode",
+                            config_key="petMode", icon="mdi:paw"),
+    NarwalSwitchDescription(key="smart_deep_clean", translation_key="smart_deep_clean",
+                            config_key="smartDeepCleanEnabled", icon="mdi:auto-fix",
+                            entity_registry_enabled_default=False),
+    NarwalSwitchDescription(key="hot_water_wash", translation_key="hot_water_wash",
+                            config_key="hotWaterWashEnabled", icon="mdi:water-thermometer",
+                            entity_registry_enabled_default=False),
 )
 
 
@@ -59,53 +48,86 @@ async def async_setup_entry(
     entry: NarwalConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up Narwal map layer switches."""
     coordinator = entry.runtime_data
-    async_add_entities(
-        NarwalLayerSwitch(coordinator, description)
-        for description in SWITCH_DESCRIPTIONS
-    )
+    entities: list[SwitchEntity] = [NarwalConfigSwitch(coordinator, d) for d in SWITCHES]
+    entities.append(NarwalDndSwitch(coordinator))
+    async_add_entities(entities)
 
 
-class NarwalLayerSwitch(NarwalEntity, SwitchEntity, RestoreEntity):
-    """Toggles the visibility of a map camera layer."""
+class NarwalConfigSwitch(NarwalEntity, SwitchEntity):
+    """A boolean robot setting."""
 
-    entity_description: NarwalLayerSwitchDescription
+    entity_description: NarwalSwitchDescription
     _attr_entity_category = EntityCategory.CONFIG
 
-    def __init__(
-        self,
-        coordinator: NarwalCoordinator,
-        description: NarwalLayerSwitchDescription,
-    ) -> None:
-        """Initialize the layer switch."""
-        super().__init__(coordinator)
+    def __init__(self, coordinator: NarwalCoordinator, description: NarwalSwitchDescription) -> None:
+        super().__init__(coordinator, description.key)
         self.entity_description = description
-        device_id = coordinator.config_entry.data["device_id"]
-        self._attr_unique_id = f"{device_id}_{description.key}"
 
-    async def async_added_to_hass(self) -> None:
-        """Restore the last layer state (defaults to on)."""
-        await super().async_added_to_hass()
-        last = await self.async_get_last_state()
-        if last is not None and last.state in ("on", "off"):
-            setattr(
-                self.coordinator, self.entity_description.flag, last.state == "on",
-            )
+    @property
+    def available(self) -> bool:
+        # Settings are only known once config/get has answered.
+        return super().available and bool(self.state_data.config)
 
     @property
     def is_on(self) -> bool:
-        """Return True when the layer is drawn."""
-        return getattr(self.coordinator, self.entity_description.flag, True)
+        # proto3: an absent bool means False.
+        return bool(self.state_data.config.get(self.entity_description.config_key, False))
 
-    async def async_turn_on(self, **kwargs) -> None:
-        """Enable the layer and refresh the map cameras."""
-        setattr(self.coordinator, self.entity_description.flag, True)
-        self.async_write_ha_state()
-        self.coordinator.async_update_listeners()
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._set(True)
 
-    async def async_turn_off(self, **kwargs) -> None:
-        """Disable the layer and refresh the map cameras."""
-        setattr(self.coordinator, self.entity_description.flag, False)
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._set(False)
+
+    async def _set(self, value: bool) -> None:
+        await self._run(self.coordinator.client.set_config(**{self.entity_description.config_key: value}))
         self.async_write_ha_state()
-        self.coordinator.async_update_listeners()
+
+
+class NarwalDndSwitch(NarwalEntity, SwitchEntity):
+    """Do-not-disturb on/off (keeps the robot's configured time window)."""
+
+    _attr_translation_key = "do_not_disturb"
+    _attr_icon = "mdi:moon-waning-crescent"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: NarwalCoordinator) -> None:
+        super().__init__(coordinator, "do_not_disturb")
+
+    @property
+    def _dnd(self) -> dict[str, Any]:
+        value = self.state_data.config.get("disturbMode")
+        return value if isinstance(value, dict) else {}
+
+    @property
+    def available(self) -> bool:
+        return super().available and bool(self.state_data.config)
+
+    @property
+    def is_on(self) -> bool:
+        return bool(self._dnd.get("enabled", False))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        def fmt(seconds: Any) -> str | None:
+            if not isinstance(seconds, int):
+                return None
+            return f"{seconds // 3600:02d}:{seconds % 3600 // 60:02d}"
+
+        return {"start": fmt(self._dnd.get("beginTime")), "end": fmt(self._dnd.get("endTime"))}
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        await self._set(True)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        await self._set(False)
+
+    async def _set(self, enabled: bool) -> None:
+        dnd = {
+            "enabled": enabled,
+            "beginTime": self._dnd.get("beginTime", 22 * 3600),
+            "endTime": self._dnd.get("endTime", 8 * 3600),
+        }
+        await self._run(self.coordinator.client.set_config(disturbMode=dnd))
+        self.async_write_ha_state()

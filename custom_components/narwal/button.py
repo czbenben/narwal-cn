@@ -1,9 +1,8 @@
-"""Button entities for Narwal vacuum."""
+"""Button entities for Narwal robot vacuum."""
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from typing import Any
 
@@ -14,48 +13,27 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import NarwalConfigEntry
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
-from .narwal_client.client import NarwalClient
-from .narwal_client.const import CommandResult
-
-_LOGGER = logging.getLogger(__name__)
+from .narwal_client import NarwalClient
 
 
 @dataclass(frozen=True, kw_only=True)
-class NarwalButtonEntityDescription(ButtonEntityDescription):
-    """Describes a Narwal button entity."""
-
-    press_fn: Callable[[NarwalClient], Awaitable[Any]]
-    # Wake the robot before sending — all station commands need the
-    # application CPU awake, but the wake button IS the wake action.
-    wake_first: bool = True
+class NarwalButtonDescription(ButtonEntityDescription):
+    press_fn: Callable[[NarwalClient], Coroutine[Any, Any, Any]]
 
 
-BUTTON_DESCRIPTIONS: tuple[NarwalButtonEntityDescription, ...] = (
-    NarwalButtonEntityDescription(
-        key="wash_mop",
-        translation_key="wash_mop",
-        icon="mdi:water-sync",
-        press_fn=lambda client: client.wash_mop(),
-    ),
-    NarwalButtonEntityDescription(
-        key="dry_mop",
-        translation_key="dry_mop",
-        icon="mdi:hair-dryer",
-        press_fn=lambda client: client.dry_mop(),
-    ),
-    NarwalButtonEntityDescription(
-        key="empty_dustbin",
-        translation_key="empty_dustbin",
-        icon="mdi:delete-empty",
-        press_fn=lambda client: client.empty_dustbin(),
-    ),
-    NarwalButtonEntityDescription(
-        key="wake",
-        translation_key="wake",
-        icon="mdi:sleep-off",
-        press_fn=lambda client: client.wake(force=True),
-        wake_first=False,
-    ),
+BUTTONS: tuple[NarwalButtonDescription, ...] = (
+    NarwalButtonDescription(key="locate", translation_key="locate",
+                            icon="mdi:map-marker-question", press_fn=lambda c: c.locate()),
+    NarwalButtonDescription(key="wake", translation_key="wake",
+                            icon="mdi:power", press_fn=lambda c: c.notify_active()),
+    NarwalButtonDescription(key="wash_mop", translation_key="wash_mop",
+                            icon="mdi:washing-machine", press_fn=lambda c: c.wash_mop()),
+    NarwalButtonDescription(key="dry_mop", translation_key="dry_mop",
+                            icon="mdi:fan", press_fn=lambda c: c.dry_mop()),
+    NarwalButtonDescription(key="wash_and_dry_mop", translation_key="wash_and_dry_mop",
+                            icon="mdi:autorenew", press_fn=lambda c: c.wash_and_dry_mop()),
+    NarwalButtonDescription(key="empty_dustbin", translation_key="empty_dustbin",
+                            icon="mdi:delete-empty", press_fn=lambda c: c.empty_dustbin()),
 )
 
 
@@ -64,44 +42,19 @@ async def async_setup_entry(
     entry: NarwalConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up Narwal button entities."""
     coordinator = entry.runtime_data
-    async_add_entities(
-        NarwalButton(coordinator, description) for description in BUTTON_DESCRIPTIONS
-    )
+    async_add_entities(NarwalButton(coordinator, d) for d in BUTTONS)
 
 
 class NarwalButton(NarwalEntity, ButtonEntity):
-    """Button entity that sends a one-shot command to the vacuum."""
+    """A one-shot robot action."""
 
-    entity_description: NarwalButtonEntityDescription
+    entity_description: NarwalButtonDescription
 
-    def __init__(
-        self,
-        coordinator: NarwalCoordinator,
-        description: NarwalButtonEntityDescription,
-    ) -> None:
-        """Initialize the button."""
-        super().__init__(coordinator)
+    def __init__(self, coordinator: NarwalCoordinator, description: NarwalButtonDescription) -> None:
+        super().__init__(coordinator, description.key)
         self.entity_description = description
-        device_id = coordinator.config_entry.data["device_id"]
-        self._attr_unique_id = f"{device_id}_{description.key}"
 
     async def async_press(self) -> None:
-        """Handle the button press."""
-        client = self.coordinator.client
-        if self.entity_description.wake_first:
-            await client.ensure_awake(timeout=10.0)
-        resp = await self.entity_description.press_fn(client)
-        result = getattr(resp, "result_code", None)
-        if result is not None and result != CommandResult.SUCCESS:
-            try:
-                result_name = CommandResult(result).name
-            except ValueError:
-                result_name = str(result)
-            _LOGGER.warning(
-                "Button %s command returned %s (code=%s)",
-                self.entity_description.key,
-                result_name,
-                result,
-            )
+        await self._run(self.entity_description.press_fn(self.coordinator.client))
+        await self.coordinator.async_request_refresh()

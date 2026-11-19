@@ -1,10 +1,10 @@
-"""Sensor entities for Narwal vacuum."""
+"""Sensor entities for Narwal robot vacuum."""
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -17,103 +17,157 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
-from .const import ERROR_CODE_SLUGS, ERROR_HELP_URL_TEMPLATE
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
-from .narwal_client import NarwalState, WorkingStatus
+from .narwal_client import NarwalState
+from .narwal_client.error_codes import error_message
+from .narwal_client.proto import enum_labels
 
-_LOGGER = logging.getLogger(__name__)
+CONSUMABLE_NAMES = {
+    "CONSUMABLE_MAINTAIN_ITEM_DUST_BOX": "Clean the dust bin",
+    "CONSUMABLE_MAINTAIN_ITEM_DUST_FILTER": "Clean the dust bin filter",
+    "CONSUMABLE_MAINTAIN_ITEM_DIRTY_WATER": "Empty the dirty water tank",
+    "CONSUMABLE_MAINTAIN_ITEM_WASH_RIBS": "Clean the base station tray",
+    "CONSUMABLE_MAINTAIN_ITEM_UNIVERSAL_WHEEL": "Clean the caster wheel",
+    "CONSUMABLE_MAINTAIN_ITEM_CLIFF_SENSOR": "Clean the sensors",
+    "CONSUMABLE_MAINTAIN_ITEM_SIDE_DISTANCE_SENSOR": "Clean the sensors",
+    "CONSUMABLE_MAINTAIN_ITEM_ANTI_WINDING_BRUSH": "Clean the roller brush",
+    "CONSUMABLE_MAINTAIN_ITEM_WATER_TANK_SPONGE": "Clean the water tank filter sponge",
+    "CONSUMABLE_MAINTAIN_ITEM_SMART_MODULE_SPONGE": "Clean the filter sponge",
+    "CONSUMABLE_MAINTAIN_ITEM_DUST_CONTAINER": "Empty the dust bin / dust bag",
+    "CONSUMABLE_REPLACE_ITEM_DUST_FILTER": "Replace the dust bin filter",
+    "CONSUMABLE_REPLACE_ITEM_MOP": "Replace the mops",
+    "CONSUMABLE_REPLACE_ITEM_SIDE_BRUSH": "Replace the side brush",
+    "CONSUMABLE_REPLACE_ITEM_ROLLER_BRUSH": "Replace the roller brush",
+    "CONSUMABLE_REPLACE_ITEM_DETERGENT": "Refill the detergent",
+    "CONSUMABLE_REPLACE_ITEM_DUST_BAG": "Replace the dust bag",
+}
 
-# Fault codes already reported in the log, so an unknown code is announced
-# once instead of on every state read.
-_LOGGED_UNKNOWN_CODES: set[int] = set()
+
+def _slug(label: Any, prefix: str) -> str | None:
+    if not isinstance(label, str):
+        return None
+    if label.startswith(prefix):
+        label = label[len(prefix):]
+    return label.lower()
+
+
+def _enum_options(enum: str, prefix: str) -> list[str]:
+    return [s for v, label in sorted(enum_labels(enum).items()) if v and (s := _slug(label, prefix))]
 
 
 @dataclass(frozen=True, kw_only=True)
-class NarwalSensorEntityDescription(SensorEntityDescription):
-    """Describes a Narwal sensor entity."""
+class NarwalSensorDescription(SensorEntityDescription):
+    value_fn: Callable[[NarwalState], Any]
+    attrs_fn: Callable[[NarwalState], dict[str, Any]] | None = None
+    exists_fn: Callable[[NarwalState], bool] = lambda _: True
 
-    value_fn: Callable[[NarwalState], float | str | None]
+
+def _base_enum(key: str, field_name: str, enum: str, prefix: str, icon: str) -> NarwalSensorDescription:
+    return NarwalSensorDescription(
+        key=key,
+        translation_key=key,
+        icon=icon,
+        device_class=SensorDeviceClass.ENUM,
+        options=_enum_options(enum, prefix),
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda s, f=field_name, p=prefix: _slug(s.base.get(f), p),
+    )
 
 
-SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
-    NarwalSensorEntityDescription(
+def _error_attrs(state: NarwalState) -> dict[str, Any]:
+    return {
+        "codes": [f"0x{c:08X}" for c in state.error_codes],
+        "messages": [error_message(c) for c in state.error_codes],
+        # Reported by the robot but not shown by the Narwal app (internal notices).
+        "hidden_codes": [f"0x{c:08X}" for c in state.hidden_error_codes],
+        "last_task_result": _slug(state.base.get("terminateReason"), "TASK_RESULT_"),
+    }
+
+
+def _consumable_attrs(state: NarwalState) -> dict[str, Any]:
+    due = state.consumables_due
+    items = due.get("maintain", []) + due.get("replace", [])
+    return {"items": sorted({CONSUMABLE_NAMES.get(i, i) for i in items}), "raw": items}
+
+
+SENSORS: tuple[NarwalSensorDescription, ...] = (
+    NarwalSensorDescription(
         key="battery",
+        translation_key="battery",
         device_class=SensorDeviceClass.BATTERY,
+        state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        # battery_level comes from field 2 (real-time SOC as float32)
-        value_fn=lambda state: state.battery_level if state.battery_level > 0 else None,
+        value_fn=lambda s: s.battery_level,
     ),
-    NarwalSensorEntityDescription(
-        key="cleaning_area",
-        translation_key="cleaning_area",
-        native_unit_of_measurement=UnitOfArea.SQUARE_METERS,
-        state_class=SensorStateClass.MEASUREMENT,
-        # working_status field 13 is cm²; divide by 10000 for m².
-        # NEEDS LIVE VALIDATION: only populated during active cleaning.
-        value_fn=lambda state: round(state.cleaning_area / 10000, 2)
-        if state.cleaning_area > 0
-        else None,
+    NarwalSensorDescription(
+        key="status",
+        translation_key="status",
+        icon="mdi:robot-vacuum",
+        value_fn=lambda s: s.status_text,
+        attrs_fn=lambda s: {"task": s.task, "sub_status": s.sub_status, "activity": s.activity},
     ),
-    NarwalSensorEntityDescription(
-        key="cleaning_time",
-        translation_key="cleaning_time",
+    NarwalSensorDescription(
+        key="error",
+        translation_key="error",
+        icon="mdi:alert-circle-outline",
+        value_fn=lambda s: error_message(s.error_codes[0]) if s.error_codes else "No error",
+        attrs_fn=_error_attrs,
+    ),
+    NarwalSensorDescription(
+        key="elapsed_time",
+        translation_key="elapsed_time",
         device_class=SensorDeviceClass.DURATION,
         native_unit_of_measurement=UnitOfTime.SECONDS,
-        state_class=SensorStateClass.MEASUREMENT,
-        # working_status field 3 is session elapsed seconds.
-        # NEEDS LIVE VALIDATION: only populated during active cleaning.
-        value_fn=lambda state: state.cleaning_time
-        if state.cleaning_time > 0
-        else None,
+        suggested_unit_of_measurement=UnitOfTime.MINUTES,
+        value_fn=lambda s: s.elapsed_time,
     ),
-    NarwalSensorEntityDescription(
-        key="firmware_version",
-        translation_key="firmware_version",
-        entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda state: state.firmware_version or None,
+    NarwalSensorDescription(
+        key="remaining_time",
+        translation_key="remaining_time",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        suggested_unit_of_measurement=UnitOfTime.MINUTES,
+        value_fn=lambda s: s.remaining_time if s.is_cleaning else None,
     ),
-    NarwalSensorEntityDescription(
-        key="dust_bag_health",
-        translation_key="dust_bag_health",
-        native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        entity_category=EntityCategory.DIAGNOSTIC,
-        icon="mdi:trash-can-outline",
-        # base_status field 41: 100 = healthy/empty bag, drops as it fills.
-        value_fn=lambda state: state.dust_bag_health
-        if state.dust_bag_health > 0
-        else None,
+    NarwalSensorDescription(
+        key="cleaned_area",
+        translation_key="cleaned_area",
+        device_class=SensorDeviceClass.AREA,
+        native_unit_of_measurement=UnitOfArea.SQUARE_METERS,
+        value_fn=lambda s: s.cleaned_area,
     ),
-    NarwalSensorEntityDescription(
-        key="cleaning_progress",
-        translation_key="cleaning_progress",
-        native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
+    NarwalSensorDescription(
+        key="progress",
+        translation_key="progress",
         icon="mdi:progress-check",
-        # working_status field 1 holds the last task's percent while
-        # idle — only report during an active clean.
-        value_fn=lambda state: round(state.cleaning_progress_pct, 1)
-        if state.is_cleaning
-        else None,
+        native_unit_of_measurement=PERCENTAGE,
+        value_fn=lambda s: s.progress if s.is_cleaning else None,
     ),
-    NarwalSensorEntityDescription(
-        key="station_activity",
-        translation_key="station_activity",
-        device_class=SensorDeviceClass.ENUM,
-        options=["idle", "mop_washing", "mop_drying", "dust_emptying"],
-        icon="mdi:home-import-outline",
-        value_fn=lambda state: (
-            "dust_emptying"
-            if state.station_dust_emptying
-            else "mop_drying"
-            if state.station_mop_drying or state.mop_drying_target > 0
-            else "mop_washing"
-            if state.working_status == WorkingStatus.MOP_WASHING
-            else "idle"
-        ),
+    NarwalSensorDescription(
+        key="current_room",
+        translation_key="current_room",
+        icon="mdi:floor-plan",
+        value_fn=lambda s: next(
+            (r.display_name for r in s.rooms if r.room_id == s.current_room_id), None
+        ) if s.is_cleaning and s.current_room_id else None,
     ),
+    NarwalSensorDescription(
+        key="consumables_due",
+        translation_key="consumables_due",
+        icon="mdi:wrench-clock",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda s: len(_consumable_attrs(s)["items"]),
+        attrs_fn=_consumable_attrs,
+    ),
+    _base_enum("clean_water_tank", "cleanWaterTankState", "RobotBaseStatus_CleanWaterTankState",
+               "CLEAN_WATER_TANK_STATE_", "mdi:water"),
+    _base_enum("dirty_water_tank", "sewageTankState", "RobotBaseStatus_SewageTankState",
+               "SEWAGE_TANK_STATE_", "mdi:water-opacity"),
+    _base_enum("dust_bin", "dustBoxState", "RobotBaseStatus_DustBoxState",
+               "DUST_BOX_STATE_", "mdi:delete-variant"),
+    _base_enum("detergent", "detergentState", "RobotBaseStatus_DetergentState",
+               "DETERGENT_STATE_", "mdi:bottle-tonic-outline"),
 )
 
 
@@ -122,142 +176,24 @@ async def async_setup_entry(
     entry: NarwalConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    """Set up Narwal sensor entities."""
     coordinator = entry.runtime_data
-    entities: list[SensorEntity] = [
-        NarwalSensor(coordinator, description) for description in SENSOR_DESCRIPTIONS
-    ]
-    entities.append(NarwalChargingStateSensor(coordinator))
-    entities.append(NarwalErrorSensor(coordinator))
-    async_add_entities(entities)
+    async_add_entities(NarwalSensor(coordinator, d) for d in SENSORS)
 
 
 class NarwalSensor(NarwalEntity, SensorEntity):
-    """A Narwal sensor entity."""
+    """A sensor computed from the vacuum state."""
 
-    entity_description: NarwalSensorEntityDescription
+    entity_description: NarwalSensorDescription
 
-    def __init__(
-        self,
-        coordinator: NarwalCoordinator,
-        description: NarwalSensorEntityDescription,
-    ) -> None:
-        """Initialize the sensor."""
-        super().__init__(coordinator)
+    def __init__(self, coordinator: NarwalCoordinator, description: NarwalSensorDescription) -> None:
+        super().__init__(coordinator, description.key)
         self.entity_description = description
-        device_id = coordinator.config_entry.data["device_id"]
-        self._attr_unique_id = f"{device_id}_{description.key}"
 
     @property
-    def native_value(self) -> float | str | None:
-        """Return the sensor value."""
-        state = self.coordinator.data
-        if state is None:
-            return None
-        return self.entity_description.value_fn(state)
-
-
-class NarwalErrorSensor(NarwalEntity, SensorEntity):
-    """Active fault reported by the robot.
-
-    State is "no_error", a translation slug for known fault codes
-    (ERROR_CODE_SLUGS), or "unknown_error" for codes we have no slug for —
-    every state is a translation key, so the UI never shows a bare number.
-    The numeric code stays available as the "code" attribute (the
-    firmware's message arrives in its own locale, so the code is the
-    stable key for automations).
-    """
-
-    _attr_translation_key = "error"
-    _attr_entity_category = EntityCategory.DIAGNOSTIC
-
-    def __init__(self, coordinator: NarwalCoordinator) -> None:
-        """Initialize the error sensor."""
-        super().__init__(coordinator)
-        device_id = coordinator.config_entry.data["device_id"]
-        self._attr_unique_id = f"{device_id}_error"
+    def native_value(self) -> Any:
+        return self.entity_description.value_fn(self.state_data)
 
     @property
-    def native_value(self) -> str | None:
-        """Return no_error, a known-fault slug, or unknown_error."""
-        state = self.coordinator.data
-        if state is None:
-            return None
-        if not state.error_code:
-            return "no_error"
-        slug = ERROR_CODE_SLUGS.get(state.error_code)
-        if slug is not None:
-            return slug
-        if state.error_code not in _LOGGED_UNKNOWN_CODES:
-            _LOGGED_UNKNOWN_CODES.add(state.error_code)
-            _LOGGER.warning(
-                "Unknown Narwal fault code %s (0x%08X), robot says %r — reported as "
-                "'unknown_error'. Please report these values so the code can be named.",
-                state.error_code,
-                state.error_code,
-                state.error_message,
-            )
-        return "unknown_error"
-
-    @property
-    def extra_state_attributes(self) -> dict[str, str | int] | None:
-        """Return error details."""
-        state = self.coordinator.data
-        if state is None or not state.error_code:
-            return None
-        return {
-            "code": state.error_code,
-            "code_hex": f"0x{state.error_code:08X}",
-            "message": state.error_message,
-            "severity": state.error_severity,
-            "help_url": ERROR_HELP_URL_TEMPLATE.format(
-                code=f"{state.error_code:08x}"
-            ),
-        }
-
-    @property
-    def icon(self) -> str:
-        """Return icon based on error state."""
-        if self.native_value in (None, "no_error"):
-            return "mdi:check-circle-outline"
-        return "mdi:alert-circle"
-
-
-class NarwalChargingStateSensor(NarwalEntity, SensorEntity):
-    """Sensor showing charging state: Charging, Fully Charged, or unavailable."""
-
-    _attr_device_class = SensorDeviceClass.ENUM
-    _attr_translation_key = "charging_state"
-    _attr_options = ["charging", "fully_charged", "not_charging"]
-
-    def __init__(self, coordinator: NarwalCoordinator) -> None:
-        """Initialize the charging state sensor."""
-        super().__init__(coordinator)
-        device_id = coordinator.config_entry.data["device_id"]
-        self._attr_unique_id = f"{device_id}_charging_state"
-
-    @property
-    def native_value(self) -> str | None:
-        """Return charging state.
-
-        Returns None (unavailable) when not docked.
-        """
-        state = self.coordinator.data
-        if state is None:
-            return None
-        if not state.is_docked:
-            return "not_charging"
-        if state.battery_level >= 100:
-            return "fully_charged"
-        return "charging"
-
-    @property
-    def icon(self) -> str:
-        """Return icon based on charging state."""
-        if self.native_value == "fully_charged":
-            return "mdi:battery"
-        if self.native_value == "charging":
-            return "mdi:battery-charging"
-        if self.native_value == "not_charging":
-            return "mdi:battery-off-outline"
-        return "mdi:battery-unknown"
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        fn = self.entity_description.attrs_fn
+        return fn(self.state_data) if fn else None

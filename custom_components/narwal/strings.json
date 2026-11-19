@@ -1,196 +1,226 @@
 {
   "config": {
-    "flow_title": "{name}",
     "step": {
       "user": {
-        "title": "Connect to Narwal Vacuum",
-        "description": "Enter the IP address of your Narwal robot vacuum and select your model.",
+        "title": "Narwal account",
+        "description": "Sign in with the account you use in the Narwal app — email or mobile number. Your robots are found automatically.",
         "data": {
-          "host": "IP Address",
-          "port": "Port",
-          "model": "Model"
+          "email": "Email / mobile number",
+          "password": "Password",
+          "area_code": "Phone area code (mobile login only)",
+          "region": "Region"
         }
       },
-      "zeroconf_confirm": {
-        "title": "Discovered Narwal Vacuum",
-        "description": "A Narwal robot vacuum was found on your network at {host}. Select the model to add it — pick \"Other / Auto-detect\" if unsure.",
+      "pick": {
+        "title": "Choose a robot",
+        "description": "Several robots are linked to this account. Pick the one to add (add the integration again for the others).",
         "data": {
-          "model": "Model"
+          "device_name": "Robot"
+        }
+      },
+      "manual": {
+        "title": "Robot details",
+        "description": "The robot list could not be loaded from the Narwal cloud. Enter the product key and the robot's 32-character MQTT device name (see scripts/README.md in the repository for how to find it).",
+        "data": {
+          "product_key": "Product key",
+          "device_name": "Device name (32 hex characters)"
         }
       }
     },
     "error": {
-      "cannot_connect": "Unable to connect to the vacuum. Check the IP address and ensure the vacuum is powered on.",
+      "invalid_auth": "Wrong email or password.",
+      "cannot_connect": "Unable to connect to the Narwal cloud.",
+      "invalid_device_name": "The device name must be 32 hexadecimal characters.",
       "unknown": "An unexpected error occurred."
     },
     "abort": {
-      "already_configured": "This vacuum is already configured."
-    }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Narwal options",
-        "data": {
-          "map_scale": "Map HD render scale"
-        },
-        "data_description": {
-          "map_scale": "Upscale factor for the Map HD camera image (higher = sharper, more CPU)."
-        }
-      }
+      "already_configured": "This robot is already set up.",
+      "no_devices": "No robots are linked to this Narwal account. Add your robot in the Narwal app first."
     }
   },
   "entity": {
     "vacuum": {
-      "vacuum": {
-        "name": "Vacuum"
+      "narwal": {
+        "name": "Narwal Vacuum"
       }
     },
     "sensor": {
-      "cleaning_area": {
-        "name": "Cleaning area"
+      "battery": {
+        "name": "Battery"
       },
-      "cleaning_time": {
-        "name": "Cleaning time"
-      },
-      "firmware_version": {
-        "name": "Firmware version"
-      },
-      "charging_state": {
-        "name": "Charging",
-        "state": {
-          "charging": "Charging",
-          "fully_charged": "Fully Charged",
-          "not_charging": "Not Charging"
-        }
-      },
-      "dust_bag_health": {
-        "name": "Dust bag health"
-      },
-      "cleaning_progress": {
-        "name": "Cleaning progress"
-      },
-      "station_activity": {
-        "name": "Station activity",
-        "state": {
-          "idle": "Idle",
-          "mop_drying": "Mop drying",
-          "dust_emptying": "Dust emptying",
-          "mop_washing": "Mop washing"
-        }
+      "status": {
+        "name": "Status"
       },
       "error": {
-        "name": "Error",
+        "name": "Error"
+      },
+      "elapsed_time": {
+        "name": "Cleaning time"
+      },
+      "remaining_time": {
+        "name": "Time remaining"
+      },
+      "cleaned_area": {
+        "name": "Cleaned area"
+      },
+      "progress": {
+        "name": "Cleaning progress"
+      },
+      "current_room": {
+        "name": "Current room"
+      },
+      "consumables_due": {
+        "name": "Maintenance items due"
+      },
+      "clean_water_tank": {
+        "name": "Clean water tank",
         "state": {
-          "no_error": "No error",
-          "base_station_overflow": "Base station overflowed",
-          "cleaning_tray_not_in_place": "Cleaning tray not in place",
-          "clean_water_tank_not_in_place": "Clean water tank not in place",
-          "clean_water_tank_error": "Clean water tank error",
-          "dirty_water_tank_full_or_missing": "Dirty water tank full or not in place",
-          "water_exchange_clean_tank_error": "Water exchange module: clean water tank error",
-          "water_exchange_module_error": "Water exchange module error",
-          "water_exchange_module_not_installed": "Water exchange module not installed",
-          "water_control_module_not_detected": "Water control module not detected",
-          "water_spray_error": "Water spray system error",
-          "dirty_water_pipe_error": "Dirty water outlet pipe error",
-          "clean_water_tank_empty": "Clean water tank empty",
-          "roller_brush_lifting_error": "Roller brush lifting error",
-          "mop_lifting_error": "Mop lifting error",
-          "mop_motor_overcurrent": "Mopping module motor overcurrent",
-          "side_brush_error": "Side brush error",
-          "roller_brush_entangled": "Roller brush entangled",
-          "dust_bin_not_in_place": "Dust bin not in place",
-          "mopping_module_error": "Mopping module error",
-          "battery_temp_high": "Battery temperature too high",
-          "battery_temp_low": "Battery temperature too low",
-          "charging_pads_error": "Charging pads error",
-          "charging_error": "Charging error",
-          "return_to_base_failed": "Failed to return to the base station",
-          "base_station_not_found": "Cannot find the base station",
-          "repositioning_failed": "Repositioning failed",
-          "robot_trapped": "Robot is trapped",
-          "exit_base_failed": "Failed to exit the base station",
-          "base_connection_failed": "Failed to connect to the base station",
-          "mop_washing_interrupted": "Mop washing interrupted",
-          "mop_drying_interrupted": "Mop drying interrupted",
-          "entered_no_go_zone": "Entered a no-go zone",
-          "wheel_malfunction": "Drive wheel malfunction",
-          "robot_lifted": "Robot lifted off the floor",
-          "motor_cooling_down": "Motor cooling down, cannot start a task",
-          "rear_left_wheel_stuck": "Rear left drive wheel stuck",
-          "rear_right_wheel_stuck": "Rear right drive wheel stuck",
-          "rear_left_wheel_overcurrent": "Rear left drive wheel overcurrent, restart required",
-          "lidar_speed_error": "LiDAR speed error",
-          "lidar_cover_error": "LiDAR cover error",
-          "imu_error": "IMU sensor error",
-          "front_infrared_error": "Front infrared sensor error",
-          "front_ground_sensor_error": "Front ground sensor error",
-          "cliff_sensor_error": "Cliff sensor error",
-          "wall_sensor_error": "Wall sensor (PSD) error",
-          "ultrasonic_sensor_error": "Floor ultrasonic sensor error",
-          "bumper_error": "Bumper malfunction",
-          "unknown_error": "Unknown fault"
+          "normal": "Normal",
+          "empty": "Empty",
+          "not_installed": "Not installed",
+          "abnormal": "Abnormal"
+        }
+      },
+      "dirty_water_tank": {
+        "name": "Dirty water tank",
+        "state": {
+          "normal": "Normal",
+          "filled_or_not_installed": "Full or not installed",
+          "abnormal": "Abnormal"
+        }
+      },
+      "dust_bin": {
+        "name": "Dust bin",
+        "state": {
+          "normal": "Normal",
+          "not_installed": "Not installed",
+          "abnormal": "Abnormal",
+          "suggest_clean_up": "Needs emptying"
+        }
+      },
+      "detergent": {
+        "name": "Detergent",
+        "state": {
+          "installed_and_not_empty": "OK",
+          "uninstalled": "Not installed",
+          "installed_and_empty": "Empty",
+          "running_out": "Running low",
+          "not_using": "Not in use"
         }
       }
     },
     "binary_sensor": {
-      "docked": {
-        "name": "Docked",
-        "state": {
-          "on": "Docked",
-          "off": "Undocked"
-        }
-      },
       "charging": {
         "name": "Charging"
+      },
+      "docked": {
+        "name": "Docked"
+      },
+      "problem": {
+        "name": "Problem"
+      },
+      "maintenance_due": {
+        "name": "Maintenance due"
       }
     },
     "button": {
-      "wash_mop": {
-        "name": "Wash mop"
-      },
-      "dry_mop": {
-        "name": "Dry mop"
-      },
-      "empty_dustbin": {
-        "name": "Empty dustbin"
+      "locate": {
+        "name": "Locate"
       },
       "wake": {
-        "name": "Wake robot"
+        "name": "Wake up"
+      },
+      "wash_mop": {
+        "name": "Wash mops"
+      },
+      "dry_mop": {
+        "name": "Dry mops"
+      },
+      "wash_and_dry_mop": {
+        "name": "Wash and dry mops"
+      },
+      "empty_dustbin": {
+        "name": "Empty dust bin"
+      }
+    },
+    "camera": {
+      "map": {
+        "name": "Map"
       }
     },
     "select": {
+      "clean_mode": {
+        "name": "Clean mode"
+      },
       "mop_humidity": {
-        "name": "Mop humidity",
+        "name": "Mop wetness",
         "state": {
           "dry": "Dry",
           "normal": "Normal",
           "wet": "Wet"
         }
       },
-      "clean_mode": {
-        "name": "Clean mode",
+      "mop_dry_strength": {
+        "name": "Mop drying",
         "state": {
-          "sweep": "Vacuum",
-          "mop": "Mop",
-          "sweep_mop": "Vacuum & mop",
-          "sweep_then_mop": "Vacuum then mop"
+          "quiet": "Quiet",
+          "strong": "Strong",
+          "smart": "Smart"
+        }
+      },
+      "mop_wash_frequency": {
+        "name": "Mop washing frequency",
+        "state": {
+          "efficient": "Efficient",
+          "normal": "Normal",
+          "deep": "Deep"
+        }
+      },
+      "carpet_strategy": {
+        "name": "Carpet handling",
+        "state": {
+          "cross": "Cross",
+          "boost": "Boost suction",
+          "ignore": "Ignore",
+          "avoid": "Avoid"
         }
       }
     },
     "switch": {
-      "draw_trail": {
-        "name": "Draw trail"
+      "child_lock": {
+        "name": "Child lock"
       },
-      "draw_cleaned_area": {
-        "name": "Draw cleaned area"
+      "auto_empty": {
+        "name": "Auto-empty"
       },
-      "draw_furniture": {
-        "name": "Draw furniture"
+      "quiet_auto_empty": {
+        "name": "Quiet auto-empty"
       },
-      "draw_lidar_walls": {
-        "name": "Draw lidar walls"
+      "auto_detergent": {
+        "name": "Auto detergent"
+      },
+      "carpet_boost": {
+        "name": "Carpet boost"
+      },
+      "pet_mode": {
+        "name": "Pet mode"
+      },
+      "smart_deep_clean": {
+        "name": "Smart deep clean"
+      },
+      "hot_water_wash": {
+        "name": "Hot water mop wash"
+      },
+      "do_not_disturb": {
+        "name": "Do not disturb"
+      }
+    },
+    "number": {
+      "volume": {
+        "name": "Volume"
+      },
+      "clean_passes": {
+        "name": "Clean passes"
       }
     }
   }

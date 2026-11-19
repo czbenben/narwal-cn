@@ -1,196 +1,226 @@
 {
   "config": {
-    "flow_title": "{name}",
     "step": {
       "user": {
-        "title": "连接云鲸扫地机",
-        "description": "输入扫地机器人的 IP 地址并选择型号。可在路由器 DHCP 列表中查到 IP，主机名通常为 NARWAL_xxxxxx.local。",
+        "title": "云鲸账号",
+        "description": "用你在云鲸 App 里登录的账号登录——手机号或邮箱均可。你名下的机器人会被自动发现。",
         "data": {
-          "host": "IP 地址",
-          "port": "端口",
-          "model": "型号"
+          "email": "手机号 / 邮箱",
+          "password": "密码",
+          "area_code": "手机区号（仅手机号登录需要）",
+          "region": "区域"
         }
       },
-      "zeroconf_confirm": {
-        "title": "发现云鲸扫地机",
-        "description": "在局域网中发现一台云鲸扫地机器人（{host}）。选择型号后确认添加，不确定请选择「其他 / Other / Auto-detect」。",
+      "pick": {
+        "title": "选择机器人",
+        "description": "该账号下绑定了多台机器人，请选择本次要添加的一台（其余的再添加一次集成本流程）。",
         "data": {
-          "model": "型号"
+          "device_name": "机器人"
+        }
+      },
+      "manual": {
+        "title": "机器人信息",
+        "description": "无法从云鲸云获取机器人列表。请手动填写产品密钥（product key）和机器人的 32 位 MQTT 设备名。",
+        "data": {
+          "product_key": "产品密钥",
+          "device_name": "设备名（32 位十六进制）"
         }
       }
     },
     "error": {
-      "cannot_connect": "无法连接到扫地机。请检查 IP 地址，确认机器人已开机并与本机在同一局域网。若机器休眠，请先在 App 中唤醒后重试。",
+      "invalid_auth": "账号或密码错误。",
+      "cannot_connect": "无法连接云鲸云服务器。",
+      "invalid_device_name": "设备名必须是 32 位十六进制字符。",
       "unknown": "发生未知错误。"
     },
     "abort": {
-      "already_configured": "这台扫地机已经添加过了。"
-    }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "云鲸集成选项",
-        "data": {
-          "map_scale": "地图高清渲染倍率"
-        },
-        "data_description": {
-          "map_scale": "地图摄像头画面的放大倍率（越大越清晰，CPU 占用越高）。"
-        }
-      }
+      "already_configured": "该机器人已配置过。",
+      "no_devices": "该云鲸账号下没有绑定的机器人，请先在云鲸 App 中完成绑定。"
     }
   },
   "entity": {
     "vacuum": {
-      "vacuum": {
-        "name": "扫地机"
+      "narwal": {
+        "name": "云鲸扫地机"
       }
     },
     "sensor": {
-      "cleaning_area": {
-        "name": "清扫面积"
+      "battery": {
+        "name": "电量"
       },
-      "cleaning_time": {
-        "name": "清扫时长"
-      },
-      "firmware_version": {
-        "name": "固件版本"
-      },
-      "charging_state": {
-        "name": "充电状态",
-        "state": {
-          "charging": "充电中",
-          "fully_charged": "已充满",
-          "not_charging": "未充电"
-        }
-      },
-      "dust_bag_health": {
-        "name": "尘袋健康度"
-      },
-      "cleaning_progress": {
-        "name": "清扫进度"
-      },
-      "station_activity": {
-        "name": "基站状态",
-        "state": {
-          "idle": "空闲",
-          "mop_drying": "烘干拖布",
-          "dust_emptying": "集尘中",
-          "mop_washing": "清洗拖布"
-        }
+      "status": {
+        "name": "状态"
       },
       "error": {
-        "name": "故障",
+        "name": "故障"
+      },
+      "elapsed_time": {
+        "name": "已清扫时长"
+      },
+      "remaining_time": {
+        "name": "剩余时间"
+      },
+      "cleaned_area": {
+        "name": "已清扫面积"
+      },
+      "progress": {
+        "name": "清扫进度"
+      },
+      "current_room": {
+        "name": "当前房间"
+      },
+      "consumables_due": {
+        "name": "耗材到期项"
+      },
+      "clean_water_tank": {
+        "name": "清水箱",
         "state": {
-          "no_error": "无故障",
-          "base_station_overflow": "基站溢水",
-          "cleaning_tray_not_in_place": "清洁盘未安装到位",
-          "clean_water_tank_not_in_place": "清水箱未安装到位",
-          "clean_water_tank_error": "清水箱异常",
-          "dirty_water_tank_full_or_missing": "污水箱已满或未安装",
-          "water_exchange_clean_tank_error": "上下水模块：清水箱异常",
-          "water_exchange_module_error": "上下水模块异常",
-          "water_exchange_module_not_installed": "未安装上下水模块",
-          "water_control_module_not_detected": "未检测到控水模块",
-          "water_spray_error": "喷水系统异常",
-          "dirty_water_pipe_error": "污水管路异常",
-          "clean_water_tank_empty": "清水箱已空",
-          "roller_brush_lifting_error": "滚刷升降异常",
-          "mop_lifting_error": "拖布升降异常",
-          "mop_motor_overcurrent": "拖地模块电机过流",
-          "side_brush_error": "边刷异常",
-          "roller_brush_entangled": "滚刷缠绕",
-          "dust_bin_not_in_place": "尘盒未安装到位",
-          "mopping_module_error": "拖地模块异常",
-          "battery_temp_high": "电池温度过高",
-          "battery_temp_low": "电池温度过低",
-          "charging_pads_error": "充电触点异常",
-          "charging_error": "充电异常",
-          "return_to_base_failed": "返回基站失败",
-          "base_station_not_found": "找不到基站",
-          "repositioning_failed": "重新定位失败",
-          "robot_trapped": "机器人被困",
-          "exit_base_failed": "驶出基站失败",
-          "base_connection_failed": "连接基站失败",
-          "mop_washing_interrupted": "拖布清洗中断",
-          "mop_drying_interrupted": "拖布烘干中断",
-          "entered_no_go_zone": "进入禁区",
-          "wheel_malfunction": "驱动轮异常",
-          "robot_lifted": "机器人被抬起",
-          "motor_cooling_down": "电机冷却中，无法开始任务",
-          "rear_left_wheel_stuck": "左后驱动轮卡住",
-          "rear_right_wheel_stuck": "右后驱动轮卡住",
-          "rear_left_wheel_overcurrent": "左后驱动轮过流，需重启",
-          "lidar_speed_error": "激光雷达转速异常",
-          "lidar_cover_error": "激光雷达罩异常",
-          "imu_error": "IMU 传感器异常",
-          "front_infrared_error": "前红外传感器异常",
-          "front_ground_sensor_error": "前地面传感器异常",
-          "cliff_sensor_error": "悬崖传感器异常",
-          "wall_sensor_error": "沿墙传感器（PSD）异常",
-          "ultrasonic_sensor_error": "地面超声传感器异常",
-          "bumper_error": "碰撞条异常",
-          "unknown_error": "未知故障"
+          "normal": "正常",
+          "empty": "缺水",
+          "not_installed": "未安装",
+          "abnormal": "异常"
+        }
+      },
+      "dirty_water_tank": {
+        "name": "污水箱",
+        "state": {
+          "normal": "正常",
+          "filled_or_not_installed": "已满或未安装",
+          "abnormal": "异常"
+        }
+      },
+      "dust_bin": {
+        "name": "尘盒",
+        "state": {
+          "normal": "正常",
+          "not_installed": "未安装",
+          "abnormal": "异常",
+          "suggest_clean_up": "建议清理"
+        }
+      },
+      "detergent": {
+        "name": "清洁液",
+        "state": {
+          "installed_and_not_empty": "正常",
+          "uninstalled": "未安装",
+          "installed_and_empty": "已空",
+          "running_out": "即将用完",
+          "not_using": "未使用"
         }
       }
     },
     "binary_sensor": {
-      "docked": {
-        "name": "停靠基站",
-        "state": {
-          "on": "已停靠",
-          "off": "未停靠"
-        }
-      },
       "charging": {
         "name": "充电中"
+      },
+      "docked": {
+        "name": "已回基站"
+      },
+      "problem": {
+        "name": "故障"
+      },
+      "maintenance_due": {
+        "name": "需要保养"
       }
     },
     "button": {
+      "locate": {
+        "name": "寻找机器人"
+      },
+      "wake": {
+        "name": "唤醒"
+      },
       "wash_mop": {
-        "name": "清洗拖布"
+        "name": "洗拖布"
       },
       "dry_mop": {
-        "name": "烘干拖布"
+        "name": "烘拖布"
+      },
+      "wash_and_dry_mop": {
+        "name": "洗烘拖布"
       },
       "empty_dustbin": {
         "name": "集尘"
-      },
-      "wake": {
-        "name": "唤醒机器人"
+      }
+    },
+    "camera": {
+      "map": {
+        "name": "地图"
       }
     },
     "select": {
+      "clean_mode": {
+        "name": "清洁模式"
+      },
       "mop_humidity": {
         "name": "拖布湿度",
         "state": {
-          "dry": "干拖",
-          "normal": "标准",
-          "wet": "湿拖"
+          "dry": "干",
+          "normal": "正常",
+          "wet": "湿"
         }
       },
-      "clean_mode": {
-        "name": "清洁模式",
+      "mop_dry_strength": {
+        "name": "烘干强度",
         "state": {
-          "sweep": "扫地",
-          "mop": "拖地",
-          "sweep_mop": "扫拖同步",
-          "sweep_then_mop": "先扫后拖"
+          "quiet": "静音",
+          "strong": "强劲",
+          "smart": "智能"
+        }
+      },
+      "mop_wash_frequency": {
+        "name": "洗布频率",
+        "state": {
+          "efficient": "节水",
+          "normal": "标准",
+          "deep": "深度"
+        }
+      },
+      "carpet_strategy": {
+        "name": "地毯策略",
+        "state": {
+          "cross": "跨越",
+          "boost": "增压",
+          "ignore": "忽略",
+          "avoid": "规避"
         }
       }
     },
     "switch": {
-      "draw_trail": {
-        "name": "绘制轨迹"
+      "child_lock": {
+        "name": "童锁"
       },
-      "draw_cleaned_area": {
-        "name": "绘制已清扫区域"
+      "auto_empty": {
+        "name": "自动集尘"
       },
-      "draw_furniture": {
-        "name": "绘制家具"
+      "quiet_auto_empty": {
+        "name": "静音集尘"
       },
-      "draw_lidar_walls": {
-        "name": "绘制激光墙体"
+      "auto_detergent": {
+        "name": "自动加清洁液"
+      },
+      "carpet_boost": {
+        "name": "地毯增压"
+      },
+      "pet_mode": {
+        "name": "宠物模式"
+      },
+      "smart_deep_clean": {
+        "name": "智能深度清洁"
+      },
+      "hot_water_wash": {
+        "name": "热水洗拖布"
+      },
+      "do_not_disturb": {
+        "name": "勿扰模式"
+      }
+    },
+    "number": {
+      "volume": {
+        "name": "音量"
+      },
+      "clean_passes": {
+        "name": "清扫次数"
       }
     }
   }

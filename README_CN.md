@@ -1,98 +1,69 @@
-# 云鲸扫地机 Home Assistant 本地集成（国行适配版）
+# 云鲸扫地机 Home Assistant 集成（国行云端版）
 
-基于社区逆向成果 [sytchi/NarwalIntegration](https://github.com/sytchi/NarwalIntegration)（MIT）
-适配中国版机型：**无需云鲸账号、不走云端**，通过局域网 WebSocket（9002 端口）直连机器人。
+基于 [nadavbau/narwal-integration](https://github.com/nadavbau/narwal-integration)（MIT）适配中国大陆云端。
+
+**走云鲸云（`cn-mqtt.narwaltech.com` MQTT5/TLS）**，不需要机器人开机 9002，
+不需要局域网可达——只要云鲸 App 能控制，本集成就能控制。
+已实测 **逍遥001（hEA7OEshlx）** 和 **J5（Uuug39n0fD）** 国行固件应答正常。
 
 ## 相比上游的改动
 
-- **补全国行产品密钥表**：从云鲸智能 App（CN APK）`config_list.json` 提取的
-  官方完整映射，新增 AX11 / Y1(备用) / X30·X31 备用 / J64 / J65 / J72 / J73 /
-  J78 / J79 / X38 / X39 / J3 等 20+ 个密钥，自动识别覆盖国行全家桶。
-- **中文型号下拉**：逍遥001/逍遥002/逍遥002 Max/J5/J4/J3 等中文名直接选。
-- **mDNS 自动发现**：manifest 注册 `_narwal_sweeper._tcp.local`，机器人广播时
-  HA 会自动弹出发现通知（实测部分固件不常开广播，手动加 IP 永远可用）。
-- **简体中文界面**：新增 `translations/zh-Hans.json`，实体名/状态/故障码全中文。
-
-## 支持型号（本地 WS :9002）
-
-| 型号 | 状态 |
-|---|---|
-| 云鲸逍遥001 / Narwal Flow (AX12) | ✅ 协议已确认 |
-| 云鲸逍遥002 / Flow 2 (X30) | ✅ 已确认 |
-| 云鲸逍遥002 Max (CX7) | ✅ 国行变体已确认（见 rudyll/narwal_r） |
-| 云鲸 J5 | 🟡 密钥已提取，待实测 |
-| Freo Z10 Ultra (CX4) / X10 Pro (AX15) / Z10 Pro (AX26) | ✅ 社区确认 |
-| Freo 20 (J64) / Freo 20 Edge (R32) | ✅ 社区确认 |
-| J6x / J7x / X3x 新型号 | 🟡 密钥已内置，auto-detect 尝试 |
-| 云鲸 J3 / J4 / J4 Lite | ☁️ 仅云端，本地 9002 不通 |
-| Freo X Ultra (AX18/19) | ☁️ 仅云端（ZeroMQ :6789，非 WS） |
-
-## 安装
-
-### 方式一：手动复制（最直接）
-
-1. 把 `custom_components/narwal/` 整个目录复制到 HA 配置目录下的
-   `custom_components/` 中（HAOS 可用 Samba 加载项、SSH 或 File Editor）。
-2. 重启 Home Assistant。
-3. **设置 → 设备与服务 → 添加集成 → 搜索 "Narwal"**。
-4. 输入机器人 IP（路由器 DHCP 列表里查，或主机名 `NARWAL_xxxxxx.local`），
-   选择型号；不确定选「其他 / Auto-detect」。
-5. 两台扫地机各添加一次即可（逍遥001 和 J5）。
-
-### 方式二：HACS 自定义仓库
-
-把本目录推到你的 GitHub 仓库后，HACS → 自定义存储库 → 填入仓库地址，
-类型选 Integration，搜索 Narwal 安装，重启。
-
-> 也可以直接用现成国行仓库 `https://github.com/rudyll/narwal_r`（同协议），
-> 但本包的密钥表更新、覆盖型号更多。
+- **手机号登录**：支持 `loginByPw`（手机号 + 区号，默认 86），邮箱登录保留；
+  国行 App 默认手机号注册，邮箱路径适用于海外区。
+- **默认中国区**：config flow region 默认 `cn`（`cn-app` / `cn-mqtt`）。
+- **简体中文界面**：`translations/zh-Hans.json` 全中文（实体名、状态、选项）。
 
 ## 实体一览
 
-- **vacuum**：开始/暂停/继续/停止/回充、吸力档位、按房间清扫
-- **camera**：实时地图（机器人位置叠加），`map_scale` 选项调清晰度
-- **sensor**：电量、清扫面积/时长/进度、固件版本、充电状态、尘袋寿命、基站活动、故障码（带中文描述）
-- **binary_sensor**：停靠状态、充电中
-- **select**：拖布湿度、清洁模式
-- **switch**：地图绘制开关（轨迹/已扫区域/家具/激光墙）
-- **button**：清洗拖布、烘干拖布、集尘、唤醒
-- **服务**：`narwal.clean_zone`（划区清扫）、`narwal.clean_rooms`（指定房间）、`narwal.resume`
+- **vacuum**：开始/暂停/继续/停止/回充、吸力、清洁模式、拖布湿度
+- **sensor**：电量、状态、故障、清扫时长/面积/进度、当前房间、水箱/尘盒/清洁液状态、耗材到期
+- **binary_sensor**：充电中、已回基站、故障、需保养
+- **button**：寻找机器人、唤醒、洗拖布、烘拖布、洗烘、集尘
+- **camera**：实时地图（房间、轨迹、位置）
+- **select/switch/number**：清洁模式、拖布湿度、烘干强度、洗布频率、地毯策略、
+  童锁、自动集尘、静音集尘、自动加清洁液、地毯增压、宠物模式、
+  智能深度清洁、热水洗布、勿扰、音量、清扫次数
 
-## 诊断工具（电脑上直接跑，不需要 HA）
+## 安装（HACS）
 
-```bat
-pip install websockets bbpb
+1. HACS → ⋮ → 自定义存储库 → `https://github.com/czbenben/narwal-cn`，类型 **Integration** → 下载 → **重启 HA**
+2. **设置 → 设备与服务 → 添加集成 → "Narwal"**
+3. 填云鲸 App 登录信息：
+   - **手机号**（国行选这个）或邮箱，密码相同
+   - 手机区号默认 `86` 不用改
+   - 区域默认 `cn`
+4. 列出绑定设备 → 每台添加一次（逍遥001 和 J5 各加一次）
 
-:: 1) mDNS 扫描局域网内的云鲸设备（可能扫不到，机器人不常开广播）
-py tools\mdns_scan.py
+> 老版本（本地 WS 版）升级的用户：先删掉旧的配置条目再重新添加——
+> 新旧数据格式不兼容，旧条目会在启动时报错。
 
-:: 2) 验证 9002 连通性，读型号/电量/状态 —— 装集成前先跑这个！
-py tools\probe_robot.py 192.168.x.x
+## 手动安装
 
-:: 3) 不知道产品密钥时被动监听广播提取
-py tools\discover_product_key.py 192.168.x.x --wake
-```
+把 `custom_components/narwal` 复制到 HA 的 `config/custom_components/`，重启后同上添加。
+
+## 已验证
+
+| 机型 | productId | 固件 | MQTT 应答 |
+|---|---|---|---|
+| 云鲸逍遥001 (CX1) | `hEA7OEshlx` | v01.08.10.05 | ✅ get_device_info / base_status |
+| 云鲸 J5 (AX8) | `Uuug39n0fD` | v01.04.60.01 | ✅ get_device_info / base_status |
+
+实测数据：逍遥001 电量/基站状态、J5 清扫中状态（`TASK_TYPE_SWEEP`）均正常解析。
 
 ## 注意事项
 
-- **只能一个本地连接**：机器人只允许一个 WS 客户端。调试脚本和 HA 集成不要同时连。
-- **休眠**：机器人睡死后可能不响应。先用 App 唤醒（或集成里的「唤醒」按钮），再发指令。
-- **J5 待验证**：密钥已在表里，如果 J5 连不上请先用 `probe_robot.py` 确认 9002 是否开放。
-- **固件差异**：逍遥001 实测固件 v01.07.22+ 需要已建图才能 `vacuum.start`。
-- **云鲸账号**：完全不需要，本集成不访问任何云端接口。
+- **账号安全**：密码仅用于向你自己的云鲸账号换取 token，存储在 HA 本地
+  `config_entries` 中，不会发送到第三方。
+- **深度睡眠**：基站待机时机器人 MQTT 仍在线但会忽略指令；集成会自动执行
+  唤醒序列（`notify_app_event` → `active_robot_publish`）。
+- **多客户端**：同一账号的其他客户端（App/另一台 HA）会收到全部响应，
+  集成用 MQTT5 CorrelationData 匹配自己的应答，互不干扰。
+- token 约 30 天过期，集成会自动 refresh，失败时用存储的账号密码重新登录。
 
-## 协议备忘（逆向自 CN APK v2026-11）
+## 调试工具
 
-- 局域网：WebSocket `:9002`，帧 `0x01 | len+2 | 0x22 | topic_len | topic | protobuf`。
-- topic 形如 `/{product_key}/{device_id}/clean/plan/start`，密钥表见
-  `narwal_client/const.py: KNOWN_PRODUCT_KEYS`。
-- 发现：mDNS `_narwal_sweeper._tcp`；配对 SoftAP：`wss://192.168.4.1:443/device_config`。
-- 云端（本集成不用）：MQTT5 `cn-mqtt.narwaltech.com`，topic `/pid/did/thing/...` + `/general/*`，
-  REST `https://cn-app.narwaltech.com`。
-- 老机型（J1/J2）走 `nr_networking_legacy`，协议不同，不支持。
+`tools/cloud_probe.py`：登录 + 设备列表 + 影子状态一次性验证
 
-## 致谢
-
-协议逆向与参考实现：[@sjmotew](https://github.com/sjmotew/NarwalIntegration)、
-[@sytchi](https://github.com/sytchi/NarwalIntegration)、
-[@rudyll](https://github.com/rudyll/narwal_r)。MIT License 见 LICENSE。
+```bash
+python tools/cloud_probe.py <手机号> <密码>
+```

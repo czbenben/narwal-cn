@@ -1,4 +1,11 @@
-"""Config flow for Narwal vacuum integration."""
+"""Config flow for Narwal integration.
+
+1. Log in with the Narwal app's email, password and region.
+2. The robots bound to the account are listed from the Narwal cloud; with
+   one robot the entry is created right away, with several the user picks
+   one. Manual entry of product key + device name is only a fallback when
+   the list can't be fetched.
+"""
 
 from __future__ import annotations
 
@@ -6,253 +13,150 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import (
-    ConfigEntry,
-    ConfigFlow,
-    ConfigFlowResult,
-    OptionsFlow,
-)
-from homeassistant.core import callback
 
-try:
-    from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
-except ImportError:  # HA < 2023.9 fallback
-    from homeassistant.components.zeroconf import ZeroconfServiceInfo
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 
 from .const import (
-    CONF_MAP_SCALE,
-    CONF_MODEL,
+    CONF_ACCESS_TOKEN,
+    CONF_AREA_CODE,
+    CONF_DEVICE_NAME,
+    CONF_EMAIL,
+    CONF_PASSWORD,
     CONF_PRODUCT_KEY,
-    DEFAULT_MAP_SCALE,
-    DEFAULT_PORT,
+    CONF_REFRESH_TOKEN,
+    CONF_REGION,
+    CONF_USER_UUID,
     DOMAIN,
-    MAX_MAP_SCALE,
-    MIN_MAP_SCALE,
-    NARWAL_MODELS,
+    REGION_OPTIONS,
 )
-from .narwal_client import NarwalClient
+from .narwal_client import NarwalAuthError, NarwalCloud, NarwalCloudError, NarwalDevice
 
 _LOGGER = logging.getLogger(__name__)
 
-MODEL_OPTIONS = list(NARWAL_MODELS.keys())
-
-STEP_USER_DATA_SCHEMA = vol.Schema(
+STEP_LOGIN_SCHEMA = vol.Schema(
     {
-        vol.Required("host"): str,
-        vol.Optional("port", default=DEFAULT_PORT): int,
-        vol.Required(CONF_MODEL, default=MODEL_OPTIONS[0]): vol.In(MODEL_OPTIONS),
+        vol.Required(CONF_EMAIL): str,
+        vol.Required(CONF_PASSWORD): str,
+        vol.Optional(CONF_AREA_CODE, default="86"): str,
+        vol.Required(CONF_REGION, default="cn"): vol.In(REGION_OPTIONS),
     }
 )
 
+DEFAULT_PRODUCT_KEY = "EHf6cRNRGT"  # Freo X Ultra
 
-class NarwalOptionsFlow(OptionsFlow):
-    """Handle Narwal options (map rendering scale)."""
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        """Initialize options flow."""
-        self._config_entry = config_entry
-
-    async def async_step_init(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Manage the options."""
-        if user_input is not None:
-            return self.async_create_entry(data=user_input)
-
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_MAP_SCALE,
-                    default=self._config_entry.options.get(
-                        CONF_MAP_SCALE, DEFAULT_MAP_SCALE
-                    ),
-                ): vol.All(
-                    vol.Coerce(int),
-                    vol.Range(min=MIN_MAP_SCALE, max=MAX_MAP_SCALE),
-                ),
-            }
-        )
-        return self.async_show_form(step_id="init", data_schema=schema)
+def _unique_id(product_key: str, device_name: str) -> str:
+    return f"{product_key}_{device_name}"
 
 
 class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Narwal vacuum."""
+    """Handle a config flow for Narwal."""
 
     VERSION = 2
 
     def __init__(self) -> None:
-        """Initialize the config flow."""
-        self._discovered: dict[str, Any] = {}
+        self._cloud: NarwalCloud | None = None
+        self._email = ""
+        self._password = ""
+        self._area_code = "86"
+        self._region = "cn"
+        self._devices: list[NarwalDevice] = []
 
-    @staticmethod
-    @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> NarwalOptionsFlow:
-        """Create the options flow."""
-        return NarwalOptionsFlow(config_entry)
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Step 1: email, password and region."""
+        errors: dict[str, str] = {}
 
-    async def _async_try_connect(
-        self, host: str, port: int, model_label: str
-    ) -> tuple[str, str]:
-        """Connect to the robot and return (device_id, resolved_product_key).
+        if user_input is not None:
+            self._email = user_input[CONF_EMAIL]
+            self._password = user_input[CONF_PASSWORD]
+            self._area_code = user_input.get(CONF_AREA_CODE, "86")
+            self._region = user_input[CONF_REGION]
+            cloud = NarwalCloud(region=self._region)
+            try:
+                await self.hass.async_add_executor_job(
+                    cloud.login, self._email, self._password, self._area_code
+                )
+            except NarwalAuthError:
+                errors["base"] = "invalid_auth"
+            except NarwalCloudError:
+                errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Unexpected error during login")
+                errors["base"] = "unknown"
+            else:
+                self._cloud = cloud
+                return await self._async_after_login()
 
-        Raises on any connection/discovery failure.
-        """
-        product_key = NARWAL_MODELS[model_label]
+        return self.async_show_form(step_id="user", data_schema=STEP_LOGIN_SCHEMA, errors=errors)
 
-        # If user selected a specific model, set topic prefix directly
-        topic_prefix = None if product_key == "auto" else f"/{product_key}"
-
-        client = NarwalClient(
-            host=host, port=port, topic_prefix=topic_prefix,
-        )
+    async def _async_after_login(self) -> ConfigFlowResult:
+        assert self._cloud is not None
         try:
-            await client.connect()
-            # Discover device_id from broadcast, then query info
-            await client.discover_device_id(timeout=15.0)
-            # Drain any stale field5 responses left in the WebSocket
-            # buffer from discover's wake probes before sending a
-            # real command
-            await client.drain_ws_buffer()
-            device_info = await client.get_device_info()
-        finally:
-            await client.disconnect()
+            devices = await self.hass.async_add_executor_job(self._cloud.get_devices)
+        except NarwalCloudError as err:
+            _LOGGER.warning("Could not list Narwal robots, falling back to manual entry: %s", err)
+            return await self.async_step_manual()
 
-        # Use the product key that actually worked (may have been
-        # auto-detected during discovery even if user picked "auto")
-        resolved_key = client.topic_prefix.lstrip("/")
-        return device_info.device_id, resolved_key
+        configured = self._async_current_ids(include_ignore=False)
+        self._devices = [
+            d for d in devices if _unique_id(d.product_key, d.device_name) not in configured
+        ]
+        if not devices:
+            return self.async_abort(reason="no_devices")
+        if not self._devices:
+            return self.async_abort(reason="already_configured")
+        if len(self._devices) == 1:
+            return await self._async_create(self._devices[0])
+        return await self.async_step_pick()
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Handle the initial step — user enters IP, port, and model."""
-        errors: dict[str, str] = {}
-
+    async def async_step_pick(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Step 2 (several robots): choose one."""
         if user_input is not None:
-            host = user_input["host"]
-            port = user_input.get("port", DEFAULT_PORT)
-            model_label = user_input[CONF_MODEL]
+            device = next(d for d in self._devices if d.device_name == user_input[CONF_DEVICE_NAME])
+            return await self._async_create(device)
 
-            try:
-                device_id, resolved_key = await self._async_try_connect(
-                    host, port, model_label
-                )
-            except Exception as ex:
-                _LOGGER.warning(
-                    "Setup failed: %s: %s", type(ex).__name__, ex,
-                )
-                errors["base"] = "cannot_connect"
-            else:
-                await self.async_set_unique_id(device_id)
-                self._abort_if_unique_id_configured()
-
-                return self.async_create_entry(
-                    title=(
-                        model_label
-                        if NARWAL_MODELS[model_label] != "auto"
-                        else f"Narwal {resolved_key}"
-                    ),
-                    data={
-                        "host": host,
-                        "port": port,
-                        "device_id": device_id,
-                        CONF_PRODUCT_KEY: resolved_key,
-                        CONF_MODEL: model_label,
-                    },
-                )
-
+        options = {d.device_name: d.label for d in self._devices}
         return self.async_show_form(
-            step_id="user",
-            data_schema=STEP_USER_DATA_SCHEMA,
-            errors=errors,
+            step_id="pick",
+            data_schema=vol.Schema({vol.Required(CONF_DEVICE_NAME): vol.In(options)}),
         )
 
-    async def async_step_zeroconf(
-        self, discovery_info: ZeroconfServiceInfo
-    ) -> ConfigFlowResult:
-        """Handle mDNS discovery of a Narwal robot (_narwal_sweeper._tcp).
-
-        The robot advertises this service on the LAN; it is how the official
-        app finds devices for the local channel.
-        """
-        host = discovery_info.host
-        port = discovery_info.port or DEFAULT_PORT
-
-        # Log the full advertisement — TXT properties may carry the product
-        # key / device id / protocol version needed to talk to the robot.
-        _LOGGER.info(
-            "Narwal mDNS discovery: host=%s port=%s name=%s "
-            "hostname=%s properties=%s addresses=%s",
-            host,
-            port,
-            discovery_info.name,
-            getattr(discovery_info, "hostname", None),
-            discovery_info.properties,
-            getattr(discovery_info, "addresses", None),
-        )
-
-        # Skip if an entry already exists for this host.
-        self._async_abort_entries_match({"host": host})
-
-        self._discovered = {"host": host, "port": port}
-        self.context["title_placeholders"] = {"name": f"Narwal {host}"}
-
-        # NOTE: the robot accepts only ONE WebSocket client at a time — do
-        # NOT probe it here. A lingering probe connection would make the
-        # confirm step's own connect fail. Deduplication happens via the
-        # host match above and the unique id assigned on confirm.
-        return await self.async_step_zeroconf_confirm()
-
-    async def async_step_zeroconf_confirm(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Confirm adding a robot discovered via mDNS."""
+    async def async_step_manual(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        """Fallback: enter the product key and MQTT device name by hand."""
         errors: dict[str, str] = {}
-        host = self._discovered["host"]
-        port = self._discovered["port"]
-
         if user_input is not None:
-            model_label = user_input[CONF_MODEL]
-            try:
-                device_id, resolved_key = await self._async_try_connect(
-                    host, port, model_label
-                )
-            except Exception as ex:
-                _LOGGER.warning(
-                    "Zeroconf setup failed for %s: %s: %s",
-                    host, type(ex).__name__, ex,
-                )
-                errors["base"] = "cannot_connect"
+            device_name = user_input[CONF_DEVICE_NAME].strip().lower()
+            if len(device_name) != 32 or any(c not in "0123456789abcdef" for c in device_name):
+                errors[CONF_DEVICE_NAME] = "invalid_device_name"
             else:
-                await self.async_set_unique_id(device_id)
-                self._abort_if_unique_id_configured()
+                return await self._async_create(NarwalDevice(
+                    device_name=device_name,
+                    product_key=user_input[CONF_PRODUCT_KEY].strip(),
+                ))
 
-                return self.async_create_entry(
-                    title=(
-                        model_label
-                        if NARWAL_MODELS[model_label] != "auto"
-                        else f"Narwal {resolved_key}"
-                    ),
-                    data={
-                        "host": host,
-                        "port": port,
-                        "device_id": device_id,
-                        CONF_PRODUCT_KEY: resolved_key,
-                        CONF_MODEL: model_label,
-                    },
-                )
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_PRODUCT_KEY, default=DEFAULT_PRODUCT_KEY): str,
+                vol.Required(CONF_DEVICE_NAME): str,
+            }
+        )
+        return self.async_show_form(step_id="manual", data_schema=schema, errors=errors)
 
-        return self.async_show_form(
-            step_id="zeroconf_confirm",
-            data_schema=vol.Schema(
-                {
-                    # Discovered model is unknown — default to auto-detect,
-                    # which cycles all product keys.
-                    vol.Required(
-                        CONF_MODEL, default=MODEL_OPTIONS[-1]
-                    ): vol.In(MODEL_OPTIONS),
-                }
-            ),
-            description_placeholders={"host": host},
-            errors=errors,
+    async def _async_create(self, device: NarwalDevice) -> ConfigFlowResult:
+        await self.async_set_unique_id(_unique_id(device.product_key, device.device_name))
+        self._abort_if_unique_id_configured()
+        session = self._cloud.session  # type: ignore[union-attr]
+        return self.async_create_entry(
+            title=device.name or device.model or f"Narwal {device.device_name[:8]}",
+            data={
+                CONF_EMAIL: self._email,
+                CONF_PASSWORD: self._password,
+                CONF_AREA_CODE: self._area_code,
+                CONF_REGION: self._region,
+                CONF_PRODUCT_KEY: device.product_key,
+                CONF_DEVICE_NAME: device.device_name,
+                CONF_USER_UUID: session.user_uuid,
+                CONF_ACCESS_TOKEN: session.access_token,
+                CONF_REFRESH_TOKEN: session.refresh_token,
+            },
         )
