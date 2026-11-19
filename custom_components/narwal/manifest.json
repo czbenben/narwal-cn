@@ -2,7 +2,8 @@
   "domain": "narwal",
   "name": "Narwal 云鲸 Robot Vacuum",
   "codeowners": [
-    "@sytchi"
+    "@sytchi",
+    "@czbenben"
   ],
   "config_flow": true,
   "dependencies": [],
