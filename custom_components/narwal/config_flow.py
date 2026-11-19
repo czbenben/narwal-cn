@@ -178,6 +178,19 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
         host = discovery_info.host
         port = discovery_info.port or DEFAULT_PORT
 
+        # Log the full advertisement — TXT properties may carry the product
+        # key / device id / protocol version needed to talk to the robot.
+        _LOGGER.info(
+            "Narwal mDNS discovery: host=%s port=%s name=%s "
+            "hostname=%s properties=%s addresses=%s",
+            host,
+            port,
+            discovery_info.name,
+            getattr(discovery_info, "hostname", None),
+            discovery_info.properties,
+            getattr(discovery_info, "addresses", None),
+        )
+
         # Skip if an entry already exists for this host.
         self._async_abort_entries_match({"host": host})
 

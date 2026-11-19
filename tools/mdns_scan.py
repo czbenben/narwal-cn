@@ -63,8 +63,8 @@ def decode_name(data: bytes, offset: int) -> tuple[str, int]:
 
 
 def parse_response(data: bytes) -> dict:
-    """Extract PTR/SRV/A records from a DNS response."""
-    result: dict = {"ptr": [], "srv": [], "a": []}
+    """Extract PTR/SRV/TXT/A records from a DNS response."""
+    result: dict = {"ptr": [], "srv": [], "a": [], "txt": []}
     if len(data) < 12:
         return result
     qd, an, ns, ar = struct.unpack(">HHHH", data[4:12])
@@ -74,7 +74,7 @@ def parse_response(data: bytes) -> dict:
         offset += 4
     for _ in range(an + ns + ar):
         try:
-            _, offset = decode_name(data, offset)
+            owner, offset = decode_name(data, offset)
             rtype, rclass, ttl, rdlen = struct.unpack(">HHIH", data[offset : offset + 10])
             offset += 10
             rdata_offset = offset
@@ -87,6 +87,16 @@ def parse_response(data: bytes) -> dict:
                     port = struct.unpack(">H", data[rdata_offset + 4 : rdata_offset + 6])[0]
                     target, _ = decode_name(data, rdata_offset + 6)
                     result["srv"].append({"port": port, "target": target})
+            elif rtype == 16:  # TXT — list of <len><bytes> key=value pairs
+                strings = []
+                p = rdata_offset
+                end = rdata_offset + rdlen
+                while p < end:
+                    ln = data[p]
+                    strings.append(data[p + 1 : p + 1 + ln].decode("utf-8", "replace"))
+                    p += 1 + ln
+                if strings:
+                    result["txt"].append({"owner": owner, "strings": strings})
             elif rtype == 1 and rdlen == 4:  # A
                 result["a"].append(socket.inet_ntoa(data[rdata_offset : rdata_offset + 4]))
         except Exception:
@@ -144,10 +154,15 @@ def main() -> int:
             resp = parse_response(data)
             for srv in resp["srv"]:
                 key = srv["target"]
-                entry = found.setdefault(key, {"host": srv["target"], "port": srv["port"], "ips": set()})
+                entry = found.setdefault(key, {"host": srv["target"], "port": srv["port"], "ips": set(), "txt": []})
                 entry["port"] = srv["port"]
+            for txt in resp["txt"]:
+                entry = found.setdefault(txt["owner"], {"host": txt["owner"], "port": None, "ips": set(), "txt": []})
+                for s in txt["strings"]:
+                    if s not in entry["txt"]:
+                        entry["txt"].append(s)
             for name in resp["ptr"]:
-                entry = found.setdefault(name, {"host": name, "port": None, "ips": set()})
+                entry = found.setdefault(name, {"host": name, "port": None, "ips": set(), "txt": []})
             for ip in resp["a"]:
                 # A 记录归属哪个实例不易精确关联，附加到最近条目 + 按源地址兜底
                 if found:
@@ -167,6 +182,8 @@ def main() -> int:
             port = e["port"] or "?"
             ips = ", ".join(sorted(e["ips"])) or "?"
             print(f"    {e['host']}  ->  {ips}  端口 {port}")
+            for s in e.get("txt", []):
+                print(f"        TXT: {s}")
         print("\n如果端口是 9002，说明该机器人支持本地协议，可以接入 Home Assistant。")
         return 0
     finally:
