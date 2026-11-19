@@ -15,10 +15,10 @@ MODEL = "Flow (AX12)"
 # "auto" cycles all known keys during discovery (slower, fallback).
 # CN-market names included — mapping from the CN app's config_list.json.
 NARWAL_MODELS: dict[str, str] = {
-    "云鲸逍遥001 / Narwal Flow (AX12)": "QoEsI5qYXO",
+    "云鲸逍遥001 / Narwal Flow (CX1)": "hEA7OEshlx",
     "云鲸逍遥002 / Narwal Flow 2 (X30)": "QxMSPG6VSO",
     "云鲸逍遥002 Max / Freo Z Ultra (CX7)": "BYWBPqSxeC",
-    "云鲸 J5": "hEA7OEshlx",
+    "云鲸 J5 (AX8)": "Uuug39n0fD",
     "云鲸 J4 / J4 Pure": "EHf6cRNRGT",
     "云鲸 J4 Lite": "6NjIDYxBXb",
     "云鲸 J3": "AX3",
