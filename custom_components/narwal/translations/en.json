@@ -1,0 +1,197 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Connect to Narwal Vacuum",
+        "description": "Enter the IP address of your Narwal robot vacuum and select your model.",
+        "data": {
+          "host": "IP Address",
+          "port": "Port",
+          "model": "Model"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Discovered Narwal Vacuum",
+        "description": "A Narwal robot vacuum was found on your network at %host. Select the model to add it — pick \"Other / Auto-detect\" if unsure.",
+        "data": {
+          "model": "Model"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the vacuum. Check the IP address and ensure the vacuum is powered on.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This vacuum is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Narwal options",
+        "data": {
+          "map_scale": "Map HD render scale"
+        },
+        "data_description": {
+          "map_scale": "Upscale factor for the Map HD camera image (higher = sharper, more CPU)."
+        }
+      }
+    }
+  },
+  "entity": {
+    "vacuum": {
+      "vacuum": {
+        "name": "Vacuum"
+      }
+    },
+    "sensor": {
+      "cleaning_area": {
+        "name": "Cleaning area"
+      },
+      "cleaning_time": {
+        "name": "Cleaning time"
+      },
+      "firmware_version": {
+        "name": "Firmware version"
+      },
+      "charging_state": {
+        "name": "Charging",
+        "state": {
+          "charging": "Charging",
+          "fully_charged": "Fully Charged",
+          "not_charging": "Not Charging"
+        }
+      },
+      "dust_bag_health": {
+        "name": "Dust bag health"
+      },
+      "cleaning_progress": {
+        "name": "Cleaning progress"
+      },
+      "station_activity": {
+        "name": "Station activity",
+        "state": {
+          "idle": "Idle",
+          "mop_drying": "Mop drying",
+          "dust_emptying": "Dust emptying",
+          "mop_washing": "Mop washing"
+        }
+      },
+      "error": {
+        "name": "Error",
+        "state": {
+          "no_error": "No error",
+          "base_station_overflow": "Base station overflowed",
+          "cleaning_tray_not_in_place": "Cleaning tray not in place",
+          "clean_water_tank_not_in_place": "Clean water tank not in place",
+          "clean_water_tank_error": "Clean water tank error",
+          "dirty_water_tank_full_or_missing": "Dirty water tank full or not in place",
+          "water_exchange_clean_tank_error": "Water exchange module: clean water tank error",
+          "water_exchange_module_error": "Water exchange module error",
+          "water_exchange_module_not_installed": "Water exchange module not installed",
+          "water_control_module_not_detected": "Water control module not detected",
+          "water_spray_error": "Water spray system error",
+          "dirty_water_pipe_error": "Dirty water outlet pipe error",
+          "clean_water_tank_empty": "Clean water tank empty",
+          "roller_brush_lifting_error": "Roller brush lifting error",
+          "mop_lifting_error": "Mop lifting error",
+          "mop_motor_overcurrent": "Mopping module motor overcurrent",
+          "side_brush_error": "Side brush error",
+          "roller_brush_entangled": "Roller brush entangled",
+          "dust_bin_not_in_place": "Dust bin not in place",
+          "mopping_module_error": "Mopping module error",
+          "battery_temp_high": "Battery temperature too high",
+          "battery_temp_low": "Battery temperature too low",
+          "charging_pads_error": "Charging pads error",
+          "charging_error": "Charging error",
+          "return_to_base_failed": "Failed to return to the base station",
+          "base_station_not_found": "Cannot find the base station",
+          "repositioning_failed": "Repositioning failed",
+          "robot_trapped": "Robot is trapped",
+          "exit_base_failed": "Failed to exit the base station",
+          "base_connection_failed": "Failed to connect to the base station",
+          "mop_washing_interrupted": "Mop washing interrupted",
+          "mop_drying_interrupted": "Mop drying interrupted",
+          "entered_no_go_zone": "Entered a no-go zone",
+          "wheel_malfunction": "Drive wheel malfunction",
+          "robot_lifted": "Robot lifted off the floor",
+          "motor_cooling_down": "Motor cooling down, cannot start a task",
+          "rear_left_wheel_stuck": "Rear left drive wheel stuck",
+          "rear_right_wheel_stuck": "Rear right drive wheel stuck",
+          "rear_left_wheel_overcurrent": "Rear left drive wheel overcurrent, restart required",
+          "lidar_speed_error": "LiDAR speed error",
+          "lidar_cover_error": "LiDAR cover error",
+          "imu_error": "IMU sensor error",
+          "front_infrared_error": "Front infrared sensor error",
+          "front_ground_sensor_error": "Front ground sensor error",
+          "cliff_sensor_error": "Cliff sensor error",
+          "wall_sensor_error": "Wall sensor (PSD) error",
+          "ultrasonic_sensor_error": "Floor ultrasonic sensor error",
+          "bumper_error": "Bumper malfunction",
+          "unknown_error": "Unknown fault"
+        }
+      }
+    },
+    "binary_sensor": {
+      "docked": {
+        "name": "Docked",
+        "state": {
+          "on": "Docked",
+          "off": "Undocked"
+        }
+      },
+      "charging": {
+        "name": "Charging"
+      }
+    },
+    "button": {
+      "wash_mop": {
+        "name": "Wash mop"
+      },
+      "dry_mop": {
+        "name": "Dry mop"
+      },
+      "empty_dustbin": {
+        "name": "Empty dustbin"
+      },
+      "wake": {
+        "name": "Wake robot"
+      }
+    },
+    "select": {
+      "mop_humidity": {
+        "name": "Mop humidity",
+        "state": {
+          "dry": "Dry",
+          "normal": "Normal",
+          "wet": "Wet"
+        }
+      },
+      "clean_mode": {
+        "name": "Clean mode",
+        "state": {
+          "sweep": "Vacuum",
+          "mop": "Mop",
+          "sweep_mop": "Vacuum & mop",
+          "sweep_then_mop": "Vacuum then mop"
+        }
+      }
+    },
+    "switch": {
+      "draw_trail": {
+        "name": "Draw trail"
+      },
+      "draw_cleaned_area": {
+        "name": "Draw cleaned area"
+      },
+      "draw_furniture": {
+        "name": "Draw furniture"
+      },
+      "draw_lidar_walls": {
+        "name": "Draw lidar walls"
+      }
+    }
+  }
+}

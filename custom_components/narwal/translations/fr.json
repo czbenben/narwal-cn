@@ -1,0 +1,185 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connexion à l’aspirateur Narwal",
+        "description": "Entrez l’adresse IP de votre robot aspirateur Narwal.",
+        "data": {
+          "host": "Adresse IP",
+          "port": "Port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossible de se connecter à l’aspirateur. Vérifiez l’adresse IP et assurez-vous que l’aspirateur est allumé.",
+      "unknown": "Une erreur inattendue s’est produite."
+    },
+    "abort": {
+      "already_configured": "Cet aspirateur est déjà configuré."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Options Narwal",
+        "data": {
+          "map_scale": "Échelle de rendu de la carte HD"
+        },
+        "data_description": {
+          "map_scale": "Facteur d'agrandissement de l'image de la caméra Carte HD (plus élevé = plus net, plus de CPU)."
+        }
+      }
+    }
+  },
+  "entity": {
+    "vacuum": {
+      "vacuum": {
+        "name": "Aspirateur"
+      }
+    },
+    "sensor": {
+      "cleaning_area": {
+        "name": "Surface nettoyée"
+      },
+      "cleaning_time": {
+        "name": "Temps de nettoyage"
+      },
+      "firmware_version": {
+        "name": "Version du firmware"
+      },
+      "charging_state": {
+        "name": "Charge",
+        "state": {
+          "charging": "En charge",
+          "fully_charged": "Chargé complètement",
+          "not_charging": "Pas en charge"
+        }
+      },
+      "dust_bag_health": {
+        "name": "Dust bag health"
+      },
+      "cleaning_progress": {
+        "name": "Cleaning progress"
+      },
+      "station_activity": {
+        "name": "Station activity",
+        "state": {
+          "idle": "Idle",
+          "mop_drying": "Mop drying",
+          "dust_emptying": "Dust emptying",
+          "mop_washing": "Mop washing"
+        }
+      },
+      "error": {
+        "name": "Error",
+        "state": {
+          "no_error": "Aucune erreur",
+          "base_station_overflow": "Débordement d'eau de la station",
+          "cleaning_tray_not_in_place": "Plateau de nettoyage absent",
+          "clean_water_tank_not_in_place": "Réservoir d'eau propre absent",
+          "clean_water_tank_error": "Erreur du réservoir d'eau propre",
+          "dirty_water_tank_full_or_missing": "Réservoir d'eau sale plein ou absent",
+          "water_exchange_clean_tank_error": "Module d'échange d'eau : erreur du réservoir d'eau propre",
+          "water_exchange_module_error": "Erreur du module d'échange d'eau",
+          "water_exchange_module_not_installed": "Module d'échange d'eau non installé",
+          "water_control_module_not_detected": "Module de contrôle d'eau non détecté",
+          "water_spray_error": "Erreur de pulvérisation d'eau",
+          "dirty_water_pipe_error": "Erreur du tuyau d'évacuation d'eau sale",
+          "clean_water_tank_empty": "Réservoir d'eau propre vide",
+          "roller_brush_lifting_error": "Erreur de levage de la brosse principale",
+          "mop_lifting_error": "Erreur de levage de la serpillière",
+          "mop_motor_overcurrent": "Surintensité du moteur du module de lavage",
+          "side_brush_error": "Erreur de la brosse latérale",
+          "roller_brush_entangled": "Brosse principale emmêlée",
+          "dust_bin_not_in_place": "Bac à poussière absent",
+          "mopping_module_error": "Erreur du module de lavage",
+          "battery_temp_high": "Température de la batterie trop élevée",
+          "battery_temp_low": "Température de la batterie trop basse",
+          "charging_pads_error": "Erreur des contacts de charge",
+          "charging_error": "Erreur de charge",
+          "return_to_base_failed": "Échec du retour à la station",
+          "base_station_not_found": "Station introuvable",
+          "repositioning_failed": "Échec du repositionnement",
+          "robot_trapped": "Robot coincé",
+          "exit_base_failed": "Échec de la sortie de la station",
+          "base_connection_failed": "Échec de connexion à la station",
+          "mop_washing_interrupted": "Lavage de la serpillière interrompu",
+          "mop_drying_interrupted": "Séchage de la serpillière interrompu",
+          "entered_no_go_zone": "Robot entré dans une zone interdite",
+          "wheel_malfunction": "Erreur des roues motrices",
+          "robot_lifted": "Robot soulevé du sol",
+          "motor_cooling_down": "Refroidissement du moteur, impossible de démarrer une tâche",
+          "rear_left_wheel_stuck": "Roue motrice arrière gauche bloquée",
+          "rear_right_wheel_stuck": "Roue motrice arrière droite bloquée",
+          "rear_left_wheel_overcurrent": "Surintensité de la roue motrice arrière gauche, redémarrage requis",
+          "lidar_speed_error": "Erreur de vitesse du LiDAR",
+          "lidar_cover_error": "Erreur du couvercle du LiDAR",
+          "imu_error": "Erreur du capteur IMU",
+          "front_infrared_error": "Erreur du capteur infrarouge avant",
+          "front_ground_sensor_error": "Erreur du capteur de sol avant",
+          "cliff_sensor_error": "Erreur du capteur de vide",
+          "wall_sensor_error": "Erreur du capteur de mur (PSD)",
+          "ultrasonic_sensor_error": "Erreur du capteur à ultrasons du sol",
+          "bumper_error": "Erreur du pare-chocs",
+          "unknown_error": "Panne inconnue"
+        }
+      }
+    },
+    "binary_sensor": {
+      "docked": {
+        "name": "Stationné",
+        "state": {
+          "on": "Stationné",
+          "off": "Non stationné"
+        }
+      }
+    },
+    "button": {
+      "wash_mop": {
+        "name": "Laver la serpillière"
+      },
+      "dry_mop": {
+        "name": "Sécher la serpillière"
+      },
+      "empty_dustbin": {
+        "name": "Vider le bac"
+      },
+      "wake": {
+        "name": "Réveiller le robot"
+      }
+    },
+    "select": {
+      "mop_humidity": {
+        "name": "Humidité de la serpillière",
+        "state": {
+          "dry": "Sec",
+          "normal": "Normal",
+          "wet": "Humide"
+        }
+      },
+      "clean_mode": {
+        "name": "Mode de nettoyage",
+        "state": {
+          "sweep": "Aspiration",
+          "mop": "Lavage",
+          "sweep_mop": "Aspiration et lavage",
+          "sweep_then_mop": "Aspiration puis lavage"
+        }
+      }
+    },
+    "switch": {
+      "draw_trail": {
+        "name": "Afficher la trajectoire"
+      },
+      "draw_cleaned_area": {
+        "name": "Afficher la zone nettoyée"
+      },
+      "draw_furniture": {
+        "name": "Afficher les meubles"
+      },
+      "draw_lidar_walls": {
+        "name": "Afficher les murs lidar"
+      }
+    }
+  }
+}

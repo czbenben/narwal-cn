@@ -1,0 +1,90 @@
+clean_zone:
+  name: Clean zone
+  description: >-
+    Clean one or more rectangular zones drawn on the map. Values are robot
+    world/map-frame coordinates — what the xiaomi-vacuum-map-card sends as
+    [[selection]] with calibration_source camera, using the Map HD camera's
+    calibration_points attribute. Corner order does not matter. The robot
+    must be docked.
+  target:
+    entity:
+      integration: narwal
+      domain: vacuum
+  fields:
+    zone:
+      name: Zone(s)
+      description: >-
+        List of rectangles, each [x1, y1, x2, y2] in robot world coordinates
+        (e.g. the xiaomi-vacuum-map-card [[selection]]).
+      required: false
+      example: "[[26, 24, 76, 76]]"
+      selector: {object: {}}
+    x1:
+      name: X1
+      description: Single-rectangle first corner X (world coordinates). Use when 'zone' is omitted.
+      required: false
+      example: 26
+      selector: {number: {min: -4000, max: 4000, mode: box}}
+    y1:
+      name: Y1
+      description: Single-rectangle first corner Y (world coordinates).
+      required: false
+      example: 24
+      selector: {number: {min: -4000, max: 4000, mode: box}}
+    x2:
+      name: X2
+      description: Single-rectangle opposite corner X (world coordinates).
+      required: false
+      example: 76
+      selector: {number: {min: -4000, max: 4000, mode: box}}
+    y2:
+      name: Y2
+      description: Single-rectangle opposite corner Y (world coordinates).
+      required: false
+      example: 76
+      selector: {number: {min: -4000, max: 4000, mode: box}}
+    fan_speed:
+      name: Fan speed
+      description: Optional suction level.
+      required: false
+      example: normal
+      selector: {select: {options: [quiet, normal, strong, max]}}
+    coordinates:
+      name: Coordinate system (removed)
+      description: >-
+        Removed in 2.0.0. Zones are always robot world coordinates now. This
+        field is still accepted so pre-2.0 automations don't error, but its
+        value is ignored.
+      required: false
+      example: world
+      selector: {text: {}}
+
+clean_rooms:
+  name: Clean rooms
+  description: >-
+    Clean specific rooms by segment id in the currently selected clean mode,
+    via clean/start_clean. The robot must be docked.
+  target:
+    entity:
+      integration: narwal
+      domain: vacuum
+  fields:
+    rooms:
+      name: Room segment ids
+      description: List of room segment ids (from vacuum/get_segments).
+      required: true
+      example: "[6]"
+      selector: {object: {}}
+
+resume:
+  name: Resume
+  description: >-
+    Resume the current task via task/resume, regardless of the reported
+    vacuum state. Use to un-stick a robot paused by a false "robot lifted"
+    error (e.g. on a doormat) even when the entity state lags behind.
+    Safe to call anytime — the robot rejects it when there is nothing
+    to resume.
+  target:
+    entity:
+      integration: narwal
+      domain: vacuum
