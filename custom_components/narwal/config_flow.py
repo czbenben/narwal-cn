@@ -184,22 +184,10 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
         self._discovered = {"host": host, "port": port}
         self.context["title_placeholders"] = {"name": f"Narwal {host}"}
 
-        # Best effort: try to read the device id now so the discovered entry
-        # can be deduplicated even if the user picks it up later. The robot
-        # may be asleep — the confirm step still lets the user proceed.
-        client = NarwalClient(host=host, port=port)
-        try:
-            await client.connect()
-            await client.discover_device_id(timeout=10.0)
-        except Exception as ex:
-            _LOGGER.debug("Zeroconf probe of %s failed: %s", host, ex)
-        else:
-            if client.device_id:
-                await self.async_set_unique_id(client.device_id)
-                self._abort_if_unique_id_configured()
-        finally:
-            await client.disconnect()
-
+        # NOTE: the robot accepts only ONE WebSocket client at a time — do
+        # NOT probe it here. A lingering probe connection would make the
+        # confirm step's own connect fail. Deduplication happens via the
+        # host match above and the unique id assigned on confirm.
         return await self.async_step_zeroconf_confirm()
 
     async def async_step_zeroconf_confirm(

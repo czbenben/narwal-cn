@@ -13,7 +13,7 @@
       },
       "zeroconf_confirm": {
         "title": "发现云鲸扫地机",
-        "description": "在局域网中发现一台云鲸扫地机器人（%host）。选择型号后确认添加，不确定请选择「其他 / Other / Auto-detect」。",
+        "description": "在局域网中发现一台云鲸扫地机器人（{host}）。选择型号后确认添加，不确定请选择「其他 / Other / Auto-detect」。",
         "data": {
           "model": "型号"
         }

@@ -13,7 +13,7 @@
       },
       "zeroconf_confirm": {
         "title": "Discovered Narwal Vacuum",
-        "description": "A Narwal robot vacuum was found on your network at %host. Select the model to add it — pick \"Other / Auto-detect\" if unsure.",
+        "description": "A Narwal robot vacuum was found on your network at {host}. Select the model to add it — pick \"Other / Auto-detect\" if unsure.",
         "data": {
           "model": "Model"
         }
