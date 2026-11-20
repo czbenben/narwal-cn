@@ -214,34 +214,109 @@ def iter_decoded_packets(cont, vs, key, iv):
 
 
 if __name__ == "__main__":
-    # 冒烟测试: 需要 D:/YJ/test_nc.py (NarwalCloud)
-    import sys
+    # 端到端验证: 登录 -> getDeviceInfo -> MQTT 起流 -> LinkVisual -> 解密 -> 解码 3 帧
+    # 依赖 D:/YJ/test_nc (NarwalCloud/NarwalClient) — 仅调试用
+    import sys, time as _t
     sys.path.insert(0, "D:/YJ")
+    sys.path.insert(0, "D:/YJ/narwal-cn/custom_components/narwal/narwal_client")
     from test_nc import NarwalCloud
+    from test_nc.client import NarwalClient
+    import urllib.request as _u
+    from paho.mqtt.properties import Properties as _Props
+    from paho.mqtt.packettypes import PacketTypes as _PT
 
-    c = NarwalCloud(region="cn")
-    s = c.login("13433725159", "LYben123", "86")
-    # authCode = user uuid
-    sess = LinkVisualSession(s.user_uuid, "tQJx38DnvJUdFPRDOy8l").connect()
-    print("relay:", sess.relay_url[:80])
-    key, iv = sess.key_iv
+    ACCT, PWD, AREA = "13433725159", "LYben123", "86"
+    PK, DID = "hEA7OEshlx", "2ff03b16330b4bda92b9ddcd7284458a"
+    BASE = f"/{PK}/{DID}"
 
-    cont, vs, dex = open_video_stream(sess.relay_url, key, iv)
-    codec = __import__("av").CodecContext.create("hevc", "r")
-    codec.extradata = dex
-    codec.open()
-    saved = 0
-    for payload, pts, dts in iter_decoded_packets(cont, vs, key, iv):
-        ap = __import__("av").Packet(payload)
-        ap.pts, ap.dts = pts, dts
-        try:
-            for f in codec.decode(ap):
-                f.to_image().save(f"D:/YJ/lv_frame_{saved}.jpg")
-                print("frame", saved, f.width, "x", f.height)
-                saved += 1
-                if saved >= 3:
-                    raise SystemExit(0)
-        except SystemExit:
-            raise
-        except Exception:
-            pass
+    def _pbs(f, s):
+        from test_nc.proto import encode_varint
+        b = s.encode() if isinstance(s, str) else s
+        return encode_varint(f << 3 | 2) + encode_varint(len(b)) + b
+
+    def _pbv(f, v):
+        from test_nc.proto import encode_varint
+        return encode_varint(f << 3) + encode_varint(v)
+
+    import asyncio
+    async def main():
+        c = NarwalCloud(region="cn")
+        s = c.login(ACCT, PWD, AREA)
+        uuid_s = s.user_uuid
+
+        ident_req = _u.Request(
+            f"https://cn-app.narwaltech.com/iot-application-platform/"
+            f"app-product-media-server/v1/getDeviceInfo?productId={PK}&deviceId={DID}",
+            headers={"Auth-Token": s.access_token})
+        import json as _j
+        r = _j.loads(_u.urlopen(ident_req, timeout=15).read())["result"]
+        mpk, mdn = r["productKey"], r["deviceName"]
+        print("media:", mpk, mdn, flush=True)
+
+        cli = NarwalClient(PK, DID, uuid_s, uuid_s, s.access_token,
+                           broker="cn-mqtt.narwaltech.com")
+        await cli.connect()
+        req_uuid = str(uuid.uuid1())
+        resp_topic = f"{BASE}/multimedia/streaming_command/response"
+        env = _pbs(1, uuid_s) + _pbs(2, uuid_s) + _pbs(5, _pbs(1, resp_topic) + _pbs(2, req_uuid))
+        from test_nc.proto import encode_varint
+        frame = b"\x01" + encode_varint(len(env)) + env
+        viewer = '{"userID":"%s","deviceID":"lv_stream tool"}' % uuid_s
+        body = (_pbv(1, 1) + _pbs(2, '{"version":1,"data":{"regionID":"0"}}')
+                + _pbv(3, 2) + _pbs(4, viewer) + _pbv(5, 0))
+        props = _Props(_PT.PUBLISH)
+        props.ResponseTopic = resp_topic
+        props.CorrelationData = _pbs(1, req_uuid) + _pbv(3, 0) + _pbv(4, int(_t.time() * 1000))
+        cli._client.publish(f"{BASE}/multimedia/streaming_command",
+                            frame + body, qos=1, properties=props)
+        print("streaming_command sent", flush=True)
+
+        async def hb():
+            while True:
+                au = _pbs(1, uuid_s) + _pbs(2, uuid_s)
+                pl = (b"\x01" + encode_varint(len(au)) + au
+                      + _pbv(1, int(_t.time() * 1000)) + _pbv(2, 1) + _pbv(3, 2)
+                      + _pbv(4, 0) + _pbv(5, 0))
+                cli._client.publish(f"{BASE}/multimedia/streaming_heartbeat", pl, qos=0)
+                await asyncio.sleep(5)
+        hb_task = asyncio.create_task(hb())
+        await asyncio.sleep(4)
+
+        sess = LinkVisualSession(uuid_s, mdn).connect()
+        print("relay:", sess.relay_url[:70], flush=True)
+        key, iv = sess.key_iv
+
+        import av
+        deadline = _t.monotonic() + 120  # robot takes a while to start pushing
+        cont = None
+        while _t.monotonic() < deadline:
+            try:
+                cont, vs, dex = open_video_stream(sess.relay_url, key, iv)
+                break
+            except Exception:
+                _t.sleep(2)
+        if cont is None:
+            print("FAIL: relay never carried data")
+            return
+        codec = av.CodecContext.create("hevc", "r")
+        codec.extradata = dex
+        codec.open()
+        saved = 0
+        for payload, pts, dts in iter_decoded_packets(cont, vs, key, iv):
+            ap = av.Packet(payload)
+            ap.pts, ap.dts = pts, dts
+            try:
+                for f in codec.decode(ap):
+                    f.to_image().save(f"D:/YJ/lv_frame_{saved}.jpg")
+                    print("frame", saved, f.width, "x", f.height, flush=True)
+                    saved += 1
+                    if saved >= 3:
+                        raise SystemExit
+            except SystemExit:
+                raise
+            except Exception:
+                pass
+        hb_task.cancel()
+        await cli.disconnect()
+
+    asyncio.run(main())

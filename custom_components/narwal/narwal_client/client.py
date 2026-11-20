@@ -61,7 +61,6 @@ from .const import (
 from .models import CommandResponse, MapSnapshot, NarwalState, Pose, strip_narwal_frame
 from .proto import ProtoError, decode, encode, encode_varint
 from .lv_stream import (
-    MediaIdentity,
     build_streaming_command,
     build_streaming_heartbeat,
 )
@@ -564,15 +563,15 @@ class NarwalClient:
 
     # ---- live video (CN models push to Aliyun LinkVisual) ----------------
 
-    async def start_video_viewer(self, ident: MediaIdentity) -> None:
-        """Tell the robot to start pushing its camera to Aliyun LinkVisual."""
+    async def start_video_viewer(self, start: bool = True) -> None:
+        """Tell the robot to start (or stop) pushing to Aliyun LinkVisual."""
         if not self._client or not self.connected:
             raise NarwalConnectionError("Not connected")
         topic = f"{self.base_topic}/{TOPIC_CMD_STREAMING}"
         resp_topic = f"{topic}/response"
         req_uuid = str(uuid.uuid1())
         payload = build_streaming_command(
-            self.user_uuid, resp_topic, req_uuid, ident
+            self.user_uuid, resp_topic, req_uuid, start=start
         )
         props = Properties(PacketTypes.PUBLISH)
         props.ResponseTopic = resp_topic

@@ -166,19 +166,33 @@ def fetch_media_identity(api_host: str, access_token: str,
 
 
 def build_streaming_command(uuid_str: str, resp_topic: str, req_uuid: str,
-                            ident: MediaIdentity) -> bytes:
-    """Full payload for multimedia/streaming_command (START viewer session)."""
+                            start: bool = True) -> bytes:
+    """Full payload for multimedia/streaming_command.
+
+    START: frame + {f1:1, f2:versionJson, f3:2, f4:viewerJson, f5:0}
+    STOP:  frame + {f1:0, f4:viewerJson}
+    (byte-level replica of the app; the robot's reply carries the media
+    identity in f2, not the command.)
+    """
     def pbs(field: int, val) -> bytes:
         b = val.encode() if isinstance(val, str) else val
         from .proto import encode_varint
         return encode_varint(field << 3 | 2) + encode_varint(len(b)) + b
 
+    def pbv(field: int, val: int) -> bytes:
+        from .proto import encode_varint
+        return encode_varint(field << 3) + encode_varint(val)
+
     from .proto import encode_varint
     env = (pbs(1, uuid_str) + pbs(2, uuid_str)
            + pbs(5, pbs(1, resp_topic) + pbs(2, req_uuid)))
     frame = b"\x01" + encode_varint(len(env)) + env
-    inner = pbs(1, ident.product_key) + pbs(2, ident.device_name) + pbs(3, ident.device_secret)
-    return frame + pbs(2, inner) + pbs(3, b"")
+    viewer = ('{"userID":"' + uuid_str + '","deviceID":"Home Assistant"}')
+    if start:
+        return (frame + pbv(1, 1)
+                + pbs(2, '{"version":1,"data":{"regionID":"0"}}')
+                + pbv(3, 2) + pbs(4, viewer) + pbv(5, 0))
+    return frame + pbv(1, 0) + pbs(4, viewer)
 
 
 def build_streaming_heartbeat(uuid_str: str) -> bytes:

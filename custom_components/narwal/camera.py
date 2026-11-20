@@ -189,7 +189,7 @@ class _LiveView:
             _LOGGER.info("Live view: media identity %s/%s",
                          ident.product_key, ident.device_name)
             asyncio.run_coroutine_threadsafe(
-                self._client.start_video_viewer(ident), self._hass.loop
+                self._client.start_video_viewer(), self._hass.loop
             ).result(timeout=10)
             _LOGGER.info("Live view: streaming_command sent")
 
@@ -198,7 +198,24 @@ class _LiveView:
             ).connect()
             key, iv = session.key_iv
             _LOGGER.info("Live view: opening relay %s", session.relay_url[:60])
-            cont, vs = open_video_stream(session.relay_url)
+            # The robot can take up to ~90s to register and start pushing;
+            # opening the relay before any data flows fails outright.
+            open_deadline = time.monotonic() + 120.0
+            while True:
+                try:
+                    cont, vs = open_video_stream(session.relay_url)
+                    break
+                except Exception:
+                    cont = None
+                    if self._stop or time.monotonic() > open_deadline:
+                        raise RuntimeError(
+                            "relay never started carrying data "
+                            "(robot did not begin pushing)"
+                        )
+                    time.sleep(2.0)
+                    asyncio.run_coroutine_threadsafe(
+                        self._client.video_heartbeat(), self._hass.loop
+                    )
             codec = av.CodecContext.create("hevc", "r")
             codec.extradata = decrypt_extradata(
                 bytes(vs.codec_context.extradata or b""), key, iv)
@@ -240,6 +257,12 @@ class _LiveView:
                     "Live view produced no frames - the robot may be asleep "
                     "or refused the streaming_command"
                 )
+            try:  # tell the robot to stop pushing
+                asyncio.run_coroutine_threadsafe(
+                    self._client.start_video_viewer(start=False), self._hass.loop
+                ).result(timeout=5)
+            except Exception:  # noqa: BLE001 - best effort
+                pass
             with self._cond:
                 self._cond.notify_all()
             if cont is not None:
