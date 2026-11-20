@@ -186,19 +186,24 @@ class _LiveView:
                 cloud._api_host, token,
                 self._client.product_key, self._client.device_name,
             )
+            _LOGGER.info("Live view: media identity %s/%s",
+                         ident.product_key, ident.device_name)
             asyncio.run_coroutine_threadsafe(
                 self._client.start_video_viewer(ident), self._hass.loop
             ).result(timeout=10)
+            _LOGGER.info("Live view: streaming_command sent")
 
             session = LinkVisualSession(
                 cloud.session.user_uuid, ident.device_name
             ).connect()
             key, iv = session.key_iv
+            _LOGGER.info("Live view: opening relay %s", session.relay_url[:60])
             cont, vs = open_video_stream(session.relay_url)
             codec = av.CodecContext.create("hevc", "r")
             codec.extradata = decrypt_extradata(
                 bytes(vs.codec_context.extradata or b""), key, iv)
             codec.open()
+            _LOGGER.info("Live view: relay open, decoding")
 
             last_hb = 0.0
             for payload, pts, dts in iter_nal_payloads(cont, vs, key, iv):
@@ -224,10 +229,17 @@ class _LiveView:
                         self._frame = buf.getvalue()
                         self._seq += 1
                         self._cond.notify_all()
-        except Exception:  # noqa: BLE001 - any failure ends the view
-            _LOGGER.debug("Live view ended", exc_info=True)
+                    if self._seq == 1:
+                        _LOGGER.info("Live view: first frame decoded")
+        except Exception as err:  # noqa: BLE001 - any failure ends the view
+            _LOGGER.warning("Live view ended with error: %s", err, exc_info=True)
         finally:
             self._dead = True
+            if self._seq == 0:
+                _LOGGER.warning(
+                    "Live view produced no frames - the robot may be asleep "
+                    "or refused the streaming_command"
+                )
             with self._cond:
                 self._cond.notify_all()
             if cont is not None:
@@ -263,7 +275,10 @@ class NarwalLiveCamera(NarwalEntity, Camera):
             self._live.stop()
 
     async def _ensure_live(self) -> _LiveView | None:
-        if not _HAS_AV or self.coordinator.cloud is None:
+        if not _HAS_AV:
+            _LOGGER.warning("Live view needs the 'av' package; it did not install")
+            return None
+        if self.coordinator.cloud is None:
             return None
         async with self._live_lock:
             if self._live is None or self._live.dead:
@@ -288,6 +303,8 @@ class NarwalLiveCamera(NarwalEntity, Camera):
         self, request: web.Request
     ) -> web.StreamResponse:
         live = await self._ensure_live()
+        if live is None:
+            return web.Response(status=503, text="live view unavailable")
         response = web.StreamResponse(
             status=200,
             reason="OK",
