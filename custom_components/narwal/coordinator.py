@@ -74,6 +74,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         else:
             self._setup_from_legacy_config(entry)
 
+    @property
+    def cloud(self) -> NarwalCloud | None:
+        return self._cloud
+
     # ------------------------------------------------------------------
     # Setup
     # ------------------------------------------------------------------

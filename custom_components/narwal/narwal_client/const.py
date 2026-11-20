@@ -31,6 +31,8 @@ TOPIC_CMD_GET_FIRMWARE_VERSION = "common/upgrade/get_firmware_version"
 TOPIC_CMD_GET_BASE_STATUS = "status/get_device_base_status"
 TOPIC_CMD_ACTIVE_ROBOT = "common/active_robot_publish"
 TOPIC_CMD_NOTIFY_APP_EVENT = "common/notify_app_event"
+TOPIC_CMD_STREAMING = "multimedia/streaming_command"
+TOPIC_CMD_STREAMING_HEARTBEAT = "multimedia/streaming_heartbeat"
 
 # Task control
 TOPIC_CMD_PAUSE = "task/pause"

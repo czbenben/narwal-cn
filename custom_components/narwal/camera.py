@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
 import logging
+import threading
 import time
+
+from aiohttp import web
 
 from homeassistant.components.camera import Camera
 from homeassistant.core import HomeAssistant, callback
@@ -13,11 +18,31 @@ from . import NarwalConfigEntry
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
 from .narwal_client.map_renderer import render_snapshot
+from .narwal_client.lv_stream import (
+    LinkVisualSession,
+    decrypt_extradata,
+    fetch_media_identity,
+    iter_nal_payloads,
+    open_video_stream,
+)
+
+try:
+    import av
+
+    _HAS_AV = True
+except ImportError:
+    av = None  # type: ignore[assignment]
+    _HAS_AV = False
 
 _LOGGER = logging.getLogger(__name__)
 
 # If the map hasn't loaded yet, ask for it at most this often.
 MAP_RETRY_SECONDS = 300
+
+# Live video: stop pushing to the relay when nobody watches for this long.
+LIVE_IDLE_SECONDS = 90.0
+LIVE_FRAME_TIMEOUT = 15.0
+LIVE_HEARTBEAT_SECONDS = 5.0
 
 
 async def async_setup_entry(
@@ -26,6 +51,8 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     async_add_entities([NarwalMapCamera(entry.runtime_data)])
+    if entry.runtime_data.cloud is not None:
+        async_add_entities([NarwalLiveCamera(entry.runtime_data)])
 
 
 class NarwalMapCamera(NarwalEntity, Camera):
@@ -102,3 +129,188 @@ class NarwalMapCamera(NarwalEntity, Camera):
             self._image = image
             self._rendered_key = key
         return self._image
+
+
+class _LiveView:
+    """Background pull of the Aliyun LinkVisual relay, decoding to JPEG.
+
+    The robot only pushes video while it believes a viewer is watching, so
+    this sends ``streaming_command`` once, heartbeats every 5 s, and simply
+    stops heartbeating to end the session (the robot times out itself).
+    """
+
+    def __init__(self, hass: HomeAssistant, coordinator: NarwalCoordinator) -> None:
+        self._hass = hass
+        self._client = coordinator.client
+        self._cloud = coordinator.cloud
+        self._cond = threading.Condition()
+        self._frame: bytes | None = None
+        self._seq = 0
+        self._dead = False
+        self._stop = False
+        self._last_consumer = time.monotonic()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, daemon=True,
+                                        name="narwal-liveview")
+        self._thread.start()
+
+    def touch(self) -> None:
+        self._last_consumer = time.monotonic()
+
+    @property
+    def dead(self) -> bool:
+        return self._dead
+
+    def wait_next(self, seq: int, timeout: float) -> tuple[int, bytes | None]:
+        """Wait for a frame newer than ``seq``; returns (new_seq, jpeg|None)."""
+        with self._cond:
+            self._cond.wait_for(
+                lambda: self._seq != seq or self._dead, timeout=timeout
+            )
+            self._last_consumer = time.monotonic()
+            return self._seq, self._frame
+
+    def stop(self) -> None:
+        self._stop = True
+        with self._cond:
+            self._cond.notify_all()
+
+    def _run(self) -> None:
+        cont = None
+        try:
+            cloud = self._cloud
+            token = cloud.ensure_valid_token()
+            ident = fetch_media_identity(
+                cloud._api_host, token,
+                self._client.product_key, self._client.device_name,
+            )
+            asyncio.run_coroutine_threadsafe(
+                self._client.start_video_viewer(ident), self._hass.loop
+            ).result(timeout=10)
+
+            session = LinkVisualSession(
+                cloud.session.user_uuid, ident.device_name
+            ).connect()
+            key, iv = session.key_iv
+            cont, vs = open_video_stream(session.relay_url)
+            codec = av.CodecContext.create("hevc", "r")
+            codec.extradata = decrypt_extradata(
+                bytes(vs.codec_context.extradata or b""), key, iv)
+            codec.open()
+
+            last_hb = 0.0
+            for payload, pts, dts in iter_nal_payloads(cont, vs, key, iv):
+                if self._stop or (
+                    time.monotonic() - self._last_consumer > LIVE_IDLE_SECONDS
+                ):
+                    break
+                if time.monotonic() - last_hb > LIVE_HEARTBEAT_SECONDS:
+                    asyncio.run_coroutine_threadsafe(
+                        self._client.video_heartbeat(), self._hass.loop
+                    )
+                    last_hb = time.monotonic()
+                packet = av.Packet(payload)
+                packet.pts, packet.dts = pts, dts
+                try:
+                    frames = codec.decode(packet)
+                except Exception:  # noqa: BLE001 - occasional corrupt tag
+                    continue
+                for frame in frames:
+                    buf = io.BytesIO()
+                    frame.to_image().save(buf, format="JPEG", quality=85)
+                    with self._cond:
+                        self._frame = buf.getvalue()
+                        self._seq += 1
+                        self._cond.notify_all()
+        except Exception:  # noqa: BLE001 - any failure ends the view
+            _LOGGER.debug("Live view ended", exc_info=True)
+        finally:
+            self._dead = True
+            with self._cond:
+                self._cond.notify_all()
+            if cont is not None:
+                try:
+                    cont.close()
+                except Exception:  # noqa: BLE001
+                    pass
+
+
+class NarwalLiveCamera(NarwalEntity, Camera):
+    """Live video from the robot camera via Aliyun LinkVisual (CN models)."""
+
+    _attr_translation_key = "live_view"
+    _attr_icon = "mdi:video"
+
+    def __init__(self, coordinator: NarwalCoordinator) -> None:
+        NarwalEntity.__init__(self, coordinator, "live_view")
+        Camera.__init__(self)
+        self.content_type = "image/jpeg"
+        self._live: _LiveView | None = None
+        self._live_lock = asyncio.Lock()
+
+    @property
+    def available(self) -> bool:
+        return _HAS_AV and self.coordinator.cloud is not None and super().available
+
+    @property
+    def frame_interval(self) -> float:
+        return 1.0
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._live is not None:
+            self._live.stop()
+
+    async def _ensure_live(self) -> _LiveView | None:
+        if not _HAS_AV or self.coordinator.cloud is None:
+            return None
+        async with self._live_lock:
+            if self._live is None or self._live.dead:
+                live = _LiveView(self.hass, self.coordinator)
+                live.start()
+                self._live = live
+            self._live.touch()
+            return self._live
+
+    async def async_camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
+        live = await self._ensure_live()
+        if live is None:
+            return None
+        _, frame = await self.hass.async_add_executor_job(
+            live.wait_next, 0, LIVE_FRAME_TIMEOUT
+        )
+        return frame
+
+    async def handle_async_mjpeg_stream(
+        self, request: web.Request
+    ) -> web.StreamResponse:
+        live = await self._ensure_live()
+        response = web.StreamResponse(
+            status=200,
+            reason="OK",
+            headers={
+                "Content-Type": "multipart/x-mixed-replace;boundary=frame"
+            },
+        )
+        await response.prepare(request)
+        seq = 0
+        try:
+            while not live.dead:
+                seq, frame = await self.hass.async_add_executor_job(
+                    live.wait_next, seq, LIVE_FRAME_TIMEOUT
+                )
+                if frame is None:
+                    if live.dead:
+                        break
+                    continue
+                await response.write(
+                    b"--frame\r\nContent-Type: image/jpeg\r\n"
+                    b"Content-Length: " + str(len(frame)).encode()
+                    + b"\r\n\r\n" + frame + b"\r\n"
+                )
+        except (ConnectionResetError, asyncio.CancelledError, ConnectionError):
+            pass
+        return response

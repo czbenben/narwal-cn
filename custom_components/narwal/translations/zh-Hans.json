@@ -146,6 +146,9 @@
     "camera": {
       "map": {
         "name": "地图"
+      },
+      "live_view": {
+        "name": "实时视频"
       }
     },
     "select": {

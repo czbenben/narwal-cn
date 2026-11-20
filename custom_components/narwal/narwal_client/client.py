@@ -44,6 +44,8 @@ from .const import (
     TOPIC_CMD_SET_FAN_LEVEL,
     TOPIC_CMD_SET_MOP_HUMIDITY,
     TOPIC_CMD_START_CLEAN,
+    TOPIC_CMD_STREAMING,
+    TOPIC_CMD_STREAMING_HEARTBEAT,
     TOPIC_CMD_WASH_AND_DRY_MOP,
     TOPIC_CMD_WASH_MOP,
     TOPIC_CMD_YELL,
@@ -58,6 +60,11 @@ from .const import (
 )
 from .models import CommandResponse, MapSnapshot, NarwalState, Pose, strip_narwal_frame
 from .proto import ProtoError, decode, encode, encode_varint
+from .lv_stream import (
+    MediaIdentity,
+    build_streaming_command,
+    build_streaming_heartbeat,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -554,6 +561,36 @@ class NarwalClient:
             await self._publish_no_response(TOPIC_CMD_ACTIVE_ROBOT, self._active_request())
         except Exception:  # noqa: BLE001 - best effort keepalive
             _LOGGER.debug("active_robot_publish failed", exc_info=True)
+
+    # ---- live video (CN models push to Aliyun LinkVisual) ----------------
+
+    async def start_video_viewer(self, ident: MediaIdentity) -> None:
+        """Tell the robot to start pushing its camera to Aliyun LinkVisual."""
+        if not self._client or not self.connected:
+            raise NarwalConnectionError("Not connected")
+        topic = f"{self.base_topic}/{TOPIC_CMD_STREAMING}"
+        resp_topic = f"{topic}/response"
+        req_uuid = str(uuid.uuid1())
+        payload = build_streaming_command(
+            self.user_uuid, resp_topic, req_uuid, ident
+        )
+        props = Properties(PacketTypes.PUBLISH)
+        props.ResponseTopic = resp_topic
+        props.CorrelationData = (
+            _pb_string(1, req_uuid)
+            + _pb_varint(3, 0)
+            + _pb_varint(4, int(time.time() * 1000))
+        )
+        self._client.publish(topic, payload, qos=PUBLISH_QOS, properties=props)
+
+    async def video_heartbeat(self) -> None:
+        """Viewer keepalive; the robot stops pushing when heartbeats lapse."""
+        if self._client and self.connected:
+            self._client.publish(
+                f"{self.base_topic}/{TOPIC_CMD_STREAMING_HEARTBEAT}",
+                build_streaming_heartbeat(self.user_uuid),
+                qos=0,
+            )
 
     # ---- status / info -------------------------------------------------
 

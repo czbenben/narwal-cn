@@ -146,6 +146,9 @@
     "camera": {
       "map": {
         "name": "Map"
+      },
+      "live_view": {
+        "name": "Live view"
       }
     },
     "select": {

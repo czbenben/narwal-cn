@@ -19,7 +19,8 @@
 - **sensor**：电量、状态、故障、清扫时长/面积/进度、当前房间、水箱/尘盒/清洁液状态、耗材到期
 - **binary_sensor**：充电中、已回基站、故障、需保养
 - **button**：寻找机器人、唤醒、洗拖布、烘拖布、洗烘、集尘
-- **camera**：实时地图（房间、轨迹、位置）
+- **camera**：实时地图（房间、轨迹、位置）、**实时视频**（逍遥001 等国行机型，
+  走阿里云 LinkVisual 中继 → HEVC 解码，支持快照和 MJPEG 直播）
 - **select/switch/number**：清洁模式、拖布湿度、烘干强度、洗布频率、地毯策略、
   童锁、自动集尘、静音集尘、自动加清洁液、地毯增压、宠物模式、
   智能深度清洁、热水洗布、勿扰、音量、清扫次数
@@ -50,6 +51,21 @@
 
 实测数据：逍遥001 电量/基站状态、J5 清扫中状态（`TASK_TYPE_SWEEP`）均正常解析。
 
+## 实时视频说明
+
+国行机型的看家视频走**阿里云 LinkVisual**（不是 Agora——Agora 只用于语音对讲）。
+集成复刻了 App 的完整链路：
+
+`streaming_command`(MQTT) → 机器人推流到 LinkVisual →
+`stream/query` 拿 RTMP 地址 + AES-128-CBC 密钥 → 解密 → HEVC 解码
+
+- 实体 `camera.实时视频`：点开即自动开始拉流，闲置 90 秒自动停止
+- 支持 MJPEG 直播（`camera_proxy_stream`）和单帧快照
+- **需要 `av` 库**（manifest 已声明，HA 会自动安装 manylinux wheel；
+  armv7 等无 wheel 平台可 `pip install av` 或忽略此实体）
+- 视频密码（App 里设置的那个）暂未接入——PIN 校验在机器人侧，字段格式未逆向完
+- 仅 CN 区机型验证过（逍遥001）；海外区视频链路不同
+
 ## 注意事项
 
 - **账号安全**：密码仅用于向你自己的云鲸账号换取 token，存储在 HA 本地
@@ -66,4 +82,10 @@
 
 ```bash
 python tools/cloud_probe.py <手机号> <密码>
+```
+
+`tools/lv_stream.py`：LinkVisual 视频链路独立验证（登录→拿流地址→解密→存 3 帧 JPEG）
+
+```bash
+python tools/lv_stream.py   # 内置测试账号，按需修改 __main__
 ```
