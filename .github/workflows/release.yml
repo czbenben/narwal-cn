@@ -1,0 +1,49 @@
+name: Release on version bump
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "custom_components/narwal/manifest.json"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get current version
+        id: current
+        run: |
+          version=$(jq -r '.version' custom_components/narwal/manifest.json)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Get previous version
+        id: previous
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          # Diff against the ref's state before this push (not HEAD~1) so that
+          # multi-commit pushes still detect a manifest bump even when the
+          # bump is not in the head commit.
+          if [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+            version="0.0.0"
+          else
+            version=$(git show "$BEFORE_SHA:custom_components/narwal/manifest.json" | jq -r '.version')
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        if: steps.current.outputs.version != steps.previous.outputs.version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="v${{ steps.current.outputs.version }}"
+          gh release create "$version" \
+            --title "$version" \
+            --generate-notes \
+            --latest

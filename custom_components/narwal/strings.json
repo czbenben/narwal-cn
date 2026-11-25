@@ -1,0 +1,338 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Narwal account",
+        "description": "Sign in with the account you use in the Narwal app — email or mobile number. Your robots are found automatically.",
+        "data": {
+          "email": "Email / mobile number",
+          "password": "Password",
+          "area_code": "Phone area code (mobile login only)",
+          "region": "Region"
+        }
+      },
+      "pick": {
+        "title": "Choose a robot",
+        "description": "Several robots are linked to this account. Pick the one to add (add the integration again for the others).",
+        "data": {
+          "device_name": "Robot"
+        }
+      },
+      "manual": {
+        "title": "Robot details",
+        "description": "The robot list could not be loaded from the Narwal cloud. Enter the product key and the robot's 32-character MQTT device name (see scripts/README.md in the repository for how to find it).",
+        "data": {
+          "product_key": "Product key",
+          "device_name": "Device name (32 hex characters)"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Wrong email or password.",
+      "cannot_connect": "Unable to connect to the Narwal cloud.",
+      "invalid_device_name": "The device name must be 32 hexadecimal characters.",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This robot is already set up.",
+      "no_devices": "No robots are linked to this Narwal account. Add your robot in the Narwal app first."
+    }
+  },
+  "entity": {
+    "vacuum": {
+      "narwal": {
+        "name": "Narwal Vacuum"
+      }
+    },
+    "sensor": {
+      "battery": {
+        "name": "Battery"
+      },
+      "status": {
+        "name": "Status"
+      },
+      "error": {
+        "name": "Error"
+      },
+      "elapsed_time": {
+        "name": "Cleaning time"
+      },
+      "remaining_time": {
+        "name": "Time remaining"
+      },
+      "cleaned_area": {
+        "name": "Cleaned area"
+      },
+      "progress": {
+        "name": "Cleaning progress"
+      },
+      "current_room": {
+        "name": "Current room"
+      },
+      "consumables_due": {
+        "name": "Maintenance items due"
+      },
+      "clean_water_tank": {
+        "name": "Clean water tank",
+        "state": {
+          "normal": "Normal",
+          "empty": "Empty",
+          "not_installed": "Not installed",
+          "abnormal": "Abnormal"
+        }
+      },
+      "dirty_water_tank": {
+        "name": "Dirty water tank",
+        "state": {
+          "normal": "Normal",
+          "filled_or_not_installed": "Full or not installed",
+          "abnormal": "Abnormal"
+        }
+      },
+      "dust_bin": {
+        "name": "Dust bin",
+        "state": {
+          "normal": "Normal",
+          "not_installed": "Not installed",
+          "abnormal": "Abnormal",
+          "suggest_clean_up": "Needs emptying"
+        }
+      },
+      "detergent": {
+        "name": "Detergent",
+        "state": {
+          "installed_and_not_empty": "OK",
+          "uninstalled": "Not installed",
+          "installed_and_empty": "Empty",
+          "running_out": "Running low",
+          "not_using": "Not in use"
+        }
+      }
+    },
+    "binary_sensor": {
+      "charging": {
+        "name": "Charging"
+      },
+      "docked": {
+        "name": "Docked"
+      },
+      "problem": {
+        "name": "Problem"
+      },
+      "maintenance_due": {
+        "name": "Maintenance due"
+      }
+    },
+    "button": {
+      "locate": {
+        "name": "Locate"
+      },
+      "wake": {
+        "name": "Wake up"
+      },
+      "wash_mop": {
+        "name": "Wash mops"
+      },
+      "dry_mop": {
+        "name": "Dry mops"
+      },
+      "wash_and_dry_mop": {
+        "name": "Wash and dry mops"
+      },
+      "empty_dustbin": {
+        "name": "Empty dust bin"
+      },
+      "reboot": {
+        "name": "Reboot"
+      },
+      "reset_consumable": {
+        "name": "Reset {name}"
+      }
+    },
+    "camera": {
+      "map": {
+        "name": "Map"
+      },
+      "live_view": {
+        "name": "Live view"
+      }
+    },
+    "select": {
+      "clean_mode": {
+        "name": "Clean mode"
+      },
+      "mop_humidity": {
+        "name": "Mop wetness",
+        "state": {
+          "dry": "Dry",
+          "normal": "Normal",
+          "wet": "Wet"
+        }
+      },
+      "mop_dry_strength": {
+        "name": "Mop drying",
+        "state": {
+          "quiet": "Quiet",
+          "strong": "Strong",
+          "smart": "Smart"
+        }
+      },
+      "mop_wash_frequency": {
+        "name": "Mop rewash strategy",
+        "state": {
+          "by_room": "Per room",
+          "every_8m2": "Every 8 m²",
+          "every_10m2": "Every 10 m²",
+          "every_12m2": "Every 12 m²"
+        }
+      },
+      "carpet_strategy": {
+        "name": "Carpet handling",
+        "state": {
+          "cross": "Cross",
+          "boost": "Boost suction",
+          "ignore": "Ignore",
+          "avoid": "Avoid"
+        }
+      },
+      "corner_clean_mode": {
+        "name": "Corner cleaning mode",
+        "state": {
+          "flexible_mop": "Mop extension",
+          "rotate_robot": "Robot wiggle",
+          "off": "Off"
+        }
+      },
+      "station_clean_mode": {
+        "name": "Default station clean mode",
+        "state": {
+          "vacuum_and_mop": "Vacuum & mop",
+          "vacuum_then_mop": "Vacuum then mop",
+          "vacuum_only": "Vacuum only",
+          "mop_only": "Mop only"
+        }
+      },
+      "avoid_mode": {
+        "name": "Obstacle avoidance",
+        "state": {
+          "smart": "Smart",
+          "safer": "Safer",
+          "off": "Off"
+        }
+      },
+      "deep_corner_clean": {
+        "name": "Deep corner cleaning",
+        "state": {
+          "off": "Off",
+          "smart": "Smart run",
+          "every_time": "Every run"
+        }
+      },
+      "dust_gathering_frequency": {
+        "name": "Auto-empty frequency",
+        "state": {
+          "off": "Off",
+          "high": "High",
+          "smart": "Smart"
+        }
+      },
+      "smart_mop_repeat_limit": {
+        "name": "Re-mop limit (smart clean)",
+        "state": {
+          "smart": "Smart",
+          "1": "1",
+          "2": "2",
+          "3": "3"
+        }
+      },
+      "smart_fineness": {
+        "name": "Fineness (smart clean)",
+        "state": {
+          "smart": "Smart",
+          "standard": "Standard",
+          "fine": "Fine"
+        }
+      },
+      "smart_suction": {
+        "name": "Suction (smart clean)",
+        "state": {
+          "smart": "Smart",
+          "quiet": "Quiet",
+          "standard": "Standard",
+          "strong": "Strong",
+          "max": "Max"
+        }
+      },
+      "smart_mop_humidity": {
+        "name": "Mop wetness (smart clean)",
+        "state": {
+          "smart": "Smart",
+          "slightly_dry": "Slightly dry",
+          "standard": "Standard",
+          "slightly_wet": "Slightly wet"
+        }
+      },
+      "smart_stain_remover": {
+        "name": "Stain remover (smart clean)",
+        "state": {
+          "every_time": "Every time",
+          "every_7_days": "Every 7 days",
+          "every_14_days": "Every 14 days",
+          "off": "Not in use"
+        }
+      }
+    },
+    "switch": {
+      "child_lock": {
+        "name": "Child lock"
+      },
+      "auto_empty": {
+        "name": "Auto-empty"
+      },
+      "quiet_auto_empty": {
+        "name": "Quiet auto-empty"
+      },
+      "auto_detergent": {
+        "name": "Auto detergent"
+      },
+      "carpet_boost": {
+        "name": "Carpet boost"
+      },
+      "pet_mode": {
+        "name": "Pet mode"
+      },
+      "smart_deep_clean": {
+        "name": "Smart deep clean"
+      },
+      "hot_water_wash": {
+        "name": "Hot water mop wash"
+      },
+      "do_not_disturb": {
+        "name": "Do not disturb"
+      },
+      "dust_bin_sterilization": {
+        "name": "Antibacterial dust box"
+      },
+      "no_stairs_mode": {
+        "name": "No-stairs mode"
+      },
+      "auto_power_off": {
+        "name": "Auto power off"
+      },
+      "massive_dirty_deep_clean": {
+        "name": "Large-area deep clean"
+      },
+      "dust_sensor_deep_clean": {
+        "name": "Particle deep clean"
+      }
+    },
+    "number": {
+      "volume": {
+        "name": "Volume"
+      },
+      "clean_passes": {
+        "name": "Clean passes"
+      }
+    }
+  }
+}
