@@ -6,36 +6,73 @@ Map data format (confirmed from live robot data):
   - Skip the protobuf header (0x0a + varint length), then decode varints
   - Each varint encodes: room_id = value >> 8, pixel_type = value & 0xFF
   - Value 0 = unknown/outside, 0x20 = unassigned floor, 0x28 = unassigned obstacle
-  - pixel_type & 0x10 = wall/border edge (darker shade of room color)
+  - pixel_type & 0x18 = wall/obstacle (rendered as a deeper shade + hatch,
+    like the app); other room pixels are floor
 """
 
 from __future__ import annotations
 
+import colorsys
 import io
 import logging
+import math
 import zlib
+from pathlib import Path
 
 _LOGGER = logging.getLogger(__name__)
 
+# Pastel room palette on a near-white background, matching the app's light theme.
 ROOM_COLORS: list[tuple[int, int, int]] = [
-    (100, 149, 237),  # 1 - cornflower blue
-    (144, 238, 144),  # 2 - light green
-    (255, 182, 193),  # 3 - light pink
-    (255, 218, 185),  # 4 - peach
-    (221, 160, 221),  # 5 - plum
-    (176, 224, 230),  # 6 - powder blue
-    (255, 255, 150),  # 7 - light yellow
-    (188, 143, 143),  # 8 - rosy brown
-    (152, 251, 152),  # 9 - pale green
-    (135, 206, 250),  # 10 - light sky blue
-    (240, 128, 128),  # 11 - light coral
-    (216, 191, 216),  # 12 - thistle
+    (167, 201, 245),  # soft blue
+    (169, 224, 197),  # mint green
+    (215, 190, 240),  # lavender
+    (245, 190, 200),  # soft pink
+    (250, 224, 170),  # soft peach
+    (170, 220, 230),  # powder blue
+    (230, 210, 180),  # sand
+    (195, 230, 160),  # light green
 ]
 
-COLOR_UNKNOWN = (40, 40, 40)
-COLOR_UNASSIGNED_FLOOR = (200, 200, 200)
-COLOR_UNASSIGNED_OBSTACLE = (80, 80, 80)
-COLOR_FALLBACK = (180, 180, 180)
+COLOR_BACKGROUND = (238, 240, 244)
+COLOR_UNASSIGNED_FLOOR = (222, 226, 233)
+COLOR_OBSTACLE = (190, 196, 208)
+COLOR_FALLBACK = (222, 226, 233)
+COLOR_LABEL = (60, 64, 72)
+COLOR_ROBOT = (255, 255, 255)
+COLOR_ROBOT_OUTLINE = (32, 120, 255)
+COLOR_STATION = (255, 176, 32)
+
+_FONT_PATH = Path(__file__).parent / "assets" / "NotoSansSC-Regular-Subset.otf"
+_SYSTEM_CJK_FONTS = (
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "C:/Windows/Fonts/msyh.ttc",
+)
+
+
+def _load_font(size: int):
+    from PIL import ImageFont
+
+    for path in (_FONT_PATH, *_SYSTEM_CJK_FONTS):
+        try:
+            return ImageFont.truetype(str(path), size)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(size=size)  # Pillow >= 10.1
+    except TypeError:
+        return ImageFont.load_default()
+
+
+def _solid_shade(color: tuple[int, int, int], lightness: float = 0.87, saturation: float = 1.1) -> tuple[int, int, int]:
+    """Deeper shade of a room color that keeps its hue (the app's wall band)."""
+    r, g, b = (x / 255 for x in color)
+    h, light, sat = colorsys.rgb_to_hls(r, g, b)
+    return tuple(
+        int(x * 255)
+        for x in colorsys.hls_to_rgb(h, min(1.0, light * lightness), min(1.0, sat * saturation))
+    )
 
 
 def _decode_packed_varints(data: bytes) -> list[int]:
@@ -71,25 +108,12 @@ def _decode_packed_varints(data: bytes) -> list[int]:
     return pixels
 
 
-def _darken(color: tuple[int, int, int], amount: int = 80) -> tuple[int, int, int]:
-    return (
-        max(0, color[0] - amount),
-        max(0, color[1] - amount),
-        max(0, color[2] - amount),
-    )
-
-
-COLOR_ROBOT = (255, 255, 255)
-COLOR_ROBOT_OUTLINE = (20, 120, 255)
-COLOR_STATION = (255, 196, 0)
-
-
 def render_snapshot(
     snapshot,
     room_names: dict[int, str] | None = None,
     robot_pose=None,
     active_room_id: int | None = None,
-    scale: int = 3,
+    scale: int = 4,
 ) -> bytes:
     """Render a MapSnapshot with dock and robot markers, rotated like the app."""
     markers = []
@@ -107,21 +131,26 @@ def render_snapshot(
 
 def _draw_markers_at(img, markers, scale: int) -> None:
     """Draw (kind, x, y, heading) markers given in final image coordinates."""
-    import math
-
     from PIL import ImageDraw
 
     draw = ImageDraw.Draw(img)
     for kind, x, y, theta in markers:
         if kind == "station":
-            r = 3.5 * scale
-            draw.rectangle([x - r, y - r, x + r, y + r], fill=COLOR_STATION, outline=(0, 0, 0))
+            r = 2.6 * scale
+            draw.rounded_rectangle(
+                [x - r, y - r, x + r, y + r], radius=r * 0.4,
+                fill=(255, 255, 255), outline=(90, 100, 115), width=max(1, scale // 2),
+            )
+            draw.rectangle(
+                [x - r * 0.45, y - r * 0.45, x + r * 0.45, y + r * 0.45], fill=COLOR_STATION,
+            )
         else:
-            r = 4 * scale
-            draw.ellipse([x - r, y - r, x + r, y + r], fill=COLOR_ROBOT, outline=COLOR_ROBOT_OUTLINE, width=max(1, scale))
-            hx = x + math.cos(theta) * r
-            hy = y - math.sin(theta) * r
-            draw.line([x, y, hx, hy], fill=COLOR_ROBOT_OUTLINE, width=max(1, scale))
+            r = 3.2 * scale
+            width = max(1, int(scale * 0.7))
+            draw.ellipse([x - r, y - r, x + r, y + r], fill=COLOR_ROBOT, outline=COLOR_ROBOT_OUTLINE, width=width)
+            hx = x + math.cos(theta) * r * 0.85
+            hy = y - math.sin(theta) * r * 0.85
+            draw.line([x, y, hx, hy], fill=COLOR_ROBOT_OUTLINE, width=width)
 
 
 def render_map(
@@ -129,7 +158,7 @@ def render_map(
     width: int,
     height: int,
     room_names: dict[int, str] | None = None,
-    scale: int = 2,
+    scale: int = 4,
     markers: list | None = None,
     rotate: int = 0,
     highlight_room: int | None = None,
@@ -141,7 +170,7 @@ def render_map(
         width: Map width in pixels (field 4).
         height: Map height in pixels (field 5).
         room_names: Optional mapping of room_id to display name for labels.
-        scale: Upscale factor for visibility (default 2x).
+        scale: Upscale factor (pixels per grid cell, default 4).
 
     Returns:
         PNG image as bytes, or empty bytes on failure.
@@ -150,7 +179,7 @@ def render_map(
         return b""
 
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import Image, ImageDraw
     except ImportError:
         _LOGGER.error("Pillow is required for map rendering — pip install Pillow")
         return b""
@@ -173,8 +202,10 @@ def render_map(
     elif len(pixels) > expected:
         pixels = pixels[:expected]
 
-    img = Image.new("RGB", (width, height), COLOR_UNKNOWN)
+    img = Image.new("RGB", (width, height), COLOR_BACKGROUND)
     px = img.load()
+    solid_mask = Image.new("L", (width, height), 0)
+    mp = solid_mask.load()
 
     room_sum_x: dict[int, int] = {}
     room_sum_y: dict[int, int] = {}
@@ -188,47 +219,54 @@ def render_map(
             continue
         elif val == 0x20:
             px[x, y] = COLOR_UNASSIGNED_FLOOR
+            continue
         elif val == 0x28:
-            px[x, y] = COLOR_UNASSIGNED_OBSTACLE
+            px[x, y] = COLOR_OBSTACLE
+            mp[x, y] = 255
+            continue
+
+        room_id = (val >> 8) & 0xFFFF
+        ptype = val & 0xFF
+
+        if 1 <= room_id <= len(ROOM_COLORS):
+            base = ROOM_COLORS[room_id - 1]
+        elif room_id >= 1:
+            base = COLOR_FALLBACK
         else:
-            room_id = val >> 8
-            ptype = val & 0xFF
+            base = COLOR_UNASSIGNED_FLOOR
 
-            if 1 <= room_id <= len(ROOM_COLORS):
-                base = ROOM_COLORS[room_id - 1]
-            else:
-                base = COLOR_FALLBACK
-
-            if ptype & 0x10:
-                px[x, y] = _darken(base)
-            else:
-                px[x, y] = base
-
-            if room_names and room_id in room_names and not (ptype & 0x10):
+        if ptype & 0x18:
+            px[x, y] = _solid_shade(base) if room_id >= 1 else COLOR_OBSTACLE
+            mp[x, y] = 255
+        else:
+            px[x, y] = base
+            if highlight_room is not None and room_id == highlight_room:
+                px[x, y] = tuple(min(255, c + 45) for c in base)
+            if room_names and room_id in room_names and room_id >= 1:
                 room_sum_x[room_id] = room_sum_x.get(room_id, 0) + x
                 room_sum_y[room_id] = room_sum_y.get(room_id, 0) + y
                 room_count[room_id] = room_count.get(room_id, 0) + 1
 
-    if highlight_room is not None:
-        for i, val in enumerate(pixels):
-            if val > 0x28 and (val >> 8) == highlight_room and not (val & 0x10):
-                x, y = i % width, i // width
-                r, g, b = px[x, y]
-                px[x, y] = (min(255, r + 50), min(255, g + 50), min(255, b + 50))
-
     img = img.transpose(Image.FLIP_TOP_BOTTOM)
+    solid_mask = solid_mask.transpose(Image.FLIP_TOP_BOTTOM)
     scale = max(1, scale)
-    if scale > 1:
-        img = img.resize((width * scale, height * scale), Image.NEAREST)
 
-    # Points to annotate, in scaled image coordinates (after the flip).
-    labels: list[tuple[str, float, float]] = []
-    if room_names and room_count:
-        for rid, name in room_names.items():
-            if name and rid in room_count:
-                cx = (room_sum_x[rid] / room_count[rid] + 0.5) * scale
-                cy = (height - 1 - room_sum_y[rid] / room_count[rid] + 0.5) * scale
-                labels.append((name, cx, cy))
+    # Anti-aliased edges: nearest-neighbor upscale 2x past the target,
+    # then LANCZOS back down (supersampling).
+    if scale > 1:
+        img = img.resize((width * scale * 2, height * scale * 2), Image.NEAREST)
+        img = img.resize((width * scale, height * scale), Image.LANCZOS)
+        solid_mask = solid_mask.resize((width * scale, height * scale), Image.NEAREST)
+
+    # Diagonal hatch over wall/obstacle zones, like the app.
+    hatch = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    hd = ImageDraw.Draw(hatch)
+    step = 7 * scale
+    for hx in range(-img.size[1], img.size[0] + step, step):
+        hd.line([hx, 0, hx + img.size[1], img.size[1]], fill=(0, 0, 0, 12), width=max(1, scale // 2))
+    clipped = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    clipped.paste(hatch, (0, 0), solid_mask)
+    img = Image.alpha_composite(img.convert("RGBA"), clipped).convert("RGB")
 
     # Match the app's orientation. The robot's rotateAngle is clockwise
     # (verified against the app); PIL rotates counter-clockwise for positive
@@ -239,8 +277,8 @@ def render_map(
         img = img.rotate(rotate, expand=True)
 
     # Margin so a dock/robot sitting on the map edge isn't clipped.
-    margin = 8 * scale
-    padded = Image.new("RGB", (img.size[0] + 2 * margin, img.size[1] + 2 * margin), COLOR_UNKNOWN)
+    margin = 10 * scale
+    padded = Image.new("RGB", (img.size[0] + 2 * margin, img.size[1] + 2 * margin), COLOR_BACKGROUND)
     padded.paste(img, (margin, margin))
     img = padded
 
@@ -254,8 +292,6 @@ def render_map(
         return x + margin, y + margin
 
     if markers:
-        import math
-
         rotated = []
         for kind, (gx, gy), theta in markers:
             x = (gx + 0.5) * scale
@@ -264,19 +300,20 @@ def render_map(
             rotated.append((kind, rx, ry, theta + math.radians(rotate)))
         _draw_markers_at(img, rotated, scale)
 
-    if labels:
+    if room_names and room_count:
         draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.load_default(size=5 * scale)  # Pillow >= 10.1
-        except TypeError:
-            font = ImageFont.load_default()
-        for name, x, y in labels:
-            tx, ty = _rot(x, y)
+        font = _load_font(int(4.2 * scale))
+        for rid, name in room_names.items():
+            if not name or rid not in room_count:
+                continue
+            cx = (room_sum_x[rid] / room_count[rid] + 0.5) * scale
+            cy = (height - 1 - room_sum_y[rid] / room_count[rid] + 0.5) * scale
+            tx, ty = _rot(cx, cy)
             bbox = draw.textbbox((0, 0), name, font=font)
             tx -= (bbox[2] - bbox[0]) / 2
             ty -= (bbox[3] - bbox[1]) / 2
-            draw.text((tx, ty), name, fill=(255, 255, 255), font=font,
-                      stroke_width=max(1, scale // 2), stroke_fill=(0, 0, 0))
+            draw.text((tx, ty), name, fill=COLOR_LABEL, font=font,
+                      stroke_width=max(1, scale // 3), stroke_fill=(255, 255, 255))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
