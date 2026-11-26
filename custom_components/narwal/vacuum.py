@@ -210,7 +210,7 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         """Extra commands.
 
         clean_rooms  params: rooms: [ids], mode: "Vacuum & Mop", fan_speed:
-                     "Strong", mop_humidity: "wet", passes: 2 (all optional
+                     "强劲", mop_humidity: "wet", passes: 2 (all optional
                      except rooms)
         wash_mop | dry_mop | wash_and_dry_mop | empty_dustbin
         """

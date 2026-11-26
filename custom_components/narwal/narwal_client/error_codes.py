@@ -6,6 +6,8 @@ model. Codes arrive as 32-bit integers (hex-formatted in the app).
 
 from __future__ import annotations
 
+from .error_messages_zh import ERROR_MESSAGES_ZH
+
 ERROR_MESSAGES: dict[int, str] = {
     0x01000020: 'The base station malfunctions. Please contact customer service.',
     0x01000021: 'Please check if the base station is powered on and if the robot is inside the base station. If the task fails to start continuously, please contact customer service',
@@ -251,3 +253,12 @@ def error_message(code: int) -> str:
     if not code:
         return ""
     return ERROR_MESSAGES.get(code, f"Unknown error 0x{code:08X}")
+
+
+def error_message_zh(code: int) -> str:
+    """Return the CN app's Chinese message, falling back to the English table."""
+    if not code:
+        return ""
+    if code in ERROR_MESSAGES_ZH:
+        return ERROR_MESSAGES_ZH[code]
+    return error_message(code)

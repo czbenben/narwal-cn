@@ -69,6 +69,57 @@ _TASK_NAMES = {
     "TASK_TYPE_UPGRADE": "Updating firmware",
     "TASK_TYPE_RELOCALIZATION": "Relocating",
 }
+
+# Fixed keys for the translatable status sensor. Keep in sync with the
+# entity.sensor.status.state translations.
+STATUS_KEYS: tuple[str, ...] = (
+    "offline",
+    "unknown",
+    "error",
+    "paused",
+    "charging",
+    "sleeping",
+    "docked",
+    "idle",
+    "returning",
+    "vacuuming",
+    "mopping",
+    "vacuum_then_mop",
+    "vacuum_and_mop",
+    "smart_clean",
+    "mapping",
+    "mop_care",
+    "emptying_dustbin",
+    "drying_dust_bag",
+    "updating_firmware",
+    "relocating",
+    "departing",
+    "maintaining_floor",
+    "manual_control",
+    "video_cruise",
+    "busy",
+)
+_TASK_STATUS_KEYS = {
+    "TASK_TYPE_SWEEP": "vacuuming",
+    "TASK_TYPE_MOP": "mopping",
+    "TASK_TYPE_SWEEP_THEN_MOP": "vacuum_then_mop",
+    "TASK_TYPE_SWEEP_AND_MOP": "vacuum_and_mop",
+    "TASK_TYPE_SMART_CLEAN": "smart_clean",
+    "TASK_TYPE_COMPOSITE_CLEAN": "smart_clean",
+    "TASK_TYPE_BUILD_MAP": "mapping",
+    "TASK_TYPE_UPDATE_MAP": "mapping",
+    "TASK_TYPE_WASH_AND_DRY_MOP": "mop_care",
+    "TASK_TYPE_DUST_GATHERING": "emptying_dustbin",
+    "TASK_TYPE_DRY_STATION_BAG": "drying_dust_bag",
+    "TASK_TYPE_UPGRADE": "updating_firmware",
+    "TASK_TYPE_RECALL": "returning",
+    "TASK_TYPE_PARKING": "returning",
+    "TASK_TYPE_RELOCALIZATION": "relocating",
+    "TASK_TYPE_DEPARTURE": "departing",
+    "TASK_TYPE_MAINTIAN_FLOOR": "maintaining_floor",
+    "TASK_TYPE_TELECONTROL": "manual_control",
+    "TASK_TYPE_VIDEO_CRUISE": "video_cruise",
+}
 _IN_STATION_IDLE = frozenset({"IDLE_STATUS_IN_STATION", "IDLE_STATUS_LOW_POWER_IN_STATION"})
 _CONTACTED = frozenset({"STATION_CONTACT_TYPE_CONTACTED", "STATION_CONTACT_TYPE_CHARGING"})
 
@@ -390,6 +441,27 @@ class NarwalState:
     @property
     def is_cleaning(self) -> bool:
         return self.task in _CLEANING_TASKS
+
+    @property
+    def status_key(self) -> str:
+        """One fixed machine-readable key describing the current status."""
+        if not self.base:
+            return "unknown"
+        if not self.device_reachable:
+            return "offline"
+        if self.activity == ACTIVITY_ERROR:
+            return "error"
+        if self.is_paused:
+            return "paused"
+        if self.task == "TASK_TYPE_IDLE":
+            if self.is_charging:
+                return "charging"
+            if self.sub_status.startswith("IDLE_STATUS_LOW_POWER"):
+                return "sleeping"
+            return "docked" if self.on_station else "idle"
+        if self.activity == ACTIVITY_RETURNING:
+            return "returning"
+        return _TASK_STATUS_KEYS.get(self.task, "busy")
 
     @property
     def status_text(self) -> str:

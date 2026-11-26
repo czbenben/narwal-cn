@@ -49,7 +49,34 @@
         "name": "电量"
       },
       "status": {
-        "name": "状态"
+        "name": "状态",
+        "state": {
+          "offline": "离线",
+          "unknown": "未知",
+          "error": "故障",
+          "paused": "已暂停",
+          "charging": "充电中",
+          "sleeping": "休眠中",
+          "docked": "在基站",
+          "idle": "空闲",
+          "returning": "返回中",
+          "vacuuming": "扫地中",
+          "mopping": "拖地中",
+          "vacuum_then_mop": "先扫后拖",
+          "vacuum_and_mop": "扫拖同时",
+          "smart_clean": "智能清洁",
+          "mapping": "建图中",
+          "mop_care": "拖布清洗烘干",
+          "emptying_dustbin": "集尘中",
+          "drying_dust_bag": "尘袋烘干中",
+          "updating_firmware": "固件升级中",
+          "relocating": "重定位中",
+          "departing": "出发中",
+          "maintaining_floor": "地面养护中",
+          "manual_control": "手动控制",
+          "video_cruise": "视频巡航",
+          "busy": "任务进行中"
+        }
       },
       "error": {
         "name": "故障"
@@ -159,7 +186,13 @@
     },
     "select": {
       "clean_mode": {
-        "name": "清洁模式"
+        "name": "清洁模式",
+        "state": {
+          "Vacuum & Mop": "扫拖同时",
+          "Vacuum then Mop": "先扫后拖",
+          "Vacuum Only": "仅扫地",
+          "Mop Only": "仅拖地"
+        }
       },
       "mop_humidity": {
         "name": "拖布湿度",

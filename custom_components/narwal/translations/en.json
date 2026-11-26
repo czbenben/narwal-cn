@@ -49,7 +49,34 @@
         "name": "Battery"
       },
       "status": {
-        "name": "Status"
+        "name": "Status",
+        "state": {
+          "offline": "Offline",
+          "unknown": "Unknown",
+          "error": "Error",
+          "paused": "Paused",
+          "charging": "Charging",
+          "sleeping": "Sleeping",
+          "docked": "Docked",
+          "idle": "Idle",
+          "returning": "Returning",
+          "vacuuming": "Vacuuming",
+          "mopping": "Mopping",
+          "vacuum_then_mop": "Vacuum then mop",
+          "vacuum_and_mop": "Vacuum and mop",
+          "smart_clean": "Smart clean",
+          "mapping": "Mapping",
+          "mop_care": "Mop care",
+          "emptying_dustbin": "Emptying dust bin",
+          "drying_dust_bag": "Drying dust bag",
+          "updating_firmware": "Updating firmware",
+          "relocating": "Relocating",
+          "departing": "Departing",
+          "maintaining_floor": "Maintaining floor",
+          "manual_control": "Manual control",
+          "video_cruise": "Video cruise",
+          "busy": "Busy"
+        }
       },
       "error": {
         "name": "Error"
@@ -156,7 +183,13 @@
     },
     "select": {
       "clean_mode": {
-        "name": "Clean mode"
+        "name": "Clean mode",
+        "state": {
+          "Vacuum & Mop": "Vacuum & Mop",
+          "Vacuum then Mop": "Vacuum then Mop",
+          "Vacuum Only": "Vacuum Only",
+          "Mop Only": "Mop Only"
+        }
       },
       "mop_humidity": {
         "name": "Mop wetness",

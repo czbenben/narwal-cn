@@ -51,10 +51,10 @@ REGION_OPTIONS = {
 
 # Fan speed names shown in HA (order = app order).
 FAN_SPEED_MAP: dict[str, FanLevel] = {
-    "Quiet": FanLevel.QUIET,
-    "Normal": FanLevel.NORMAL,
-    "Strong": FanLevel.STRONG,
-    "Max": FanLevel.MAX,
+    "降噪": FanLevel.QUIET,
+    "标准": FanLevel.NORMAL,
+    "强劲": FanLevel.STRONG,
+    "超强": FanLevel.MAX,
 }
 FAN_SPEED_LIST = list(FAN_SPEED_MAP)
 FAN_SPEED_REVERSE = {v: k for k, v in FAN_SPEED_MAP.items()}

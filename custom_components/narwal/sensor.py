@@ -21,7 +21,8 @@ from . import NarwalConfigEntry
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity, remove_stale_entity
 from .narwal_client import NarwalState
-from .narwal_client.error_codes import error_message
+from .narwal_client.error_codes import error_message_zh
+from .narwal_client.models import STATUS_KEYS
 from .narwal_client.proto import enum_labels
 
 CONSUMABLE_NAMES = {
@@ -90,7 +91,7 @@ def _base_enum(
 def _error_attrs(state: NarwalState) -> dict[str, Any]:
     return {
         "codes": [f"0x{c:08X}" for c in state.error_codes],
-        "messages": [error_message(c) for c in state.error_codes],
+        "messages": [error_message_zh(c) for c in state.error_codes],
         # Reported by the robot but not shown by the Narwal app (internal notices).
         "hidden_codes": [f"0x{c:08X}" for c in state.hidden_error_codes],
         "last_task_result": _slug(state.base.get("terminateReason"), "TASK_RESULT_"),
@@ -116,14 +117,21 @@ SENSORS: tuple[NarwalSensorDescription, ...] = (
         key="status",
         translation_key="status",
         icon="mdi:robot-vacuum",
-        value_fn=lambda s: s.status_text,
-        attrs_fn=lambda s: {"task": s.task, "sub_status": s.sub_status, "activity": s.activity},
+        device_class=SensorDeviceClass.ENUM,
+        options=list(STATUS_KEYS),
+        value_fn=lambda s: s.status_key,
+        attrs_fn=lambda s: {
+            "task": s.task,
+            "sub_status": s.sub_status,
+            "activity": s.activity,
+            "detail": s.status_text,
+        },
     ),
     NarwalSensorDescription(
         key="error",
         translation_key="error",
         icon="mdi:alert-circle-outline",
-        value_fn=lambda s: error_message(s.error_codes[0]) if s.error_codes else "No error",
+        value_fn=lambda s: error_message_zh(s.error_codes[0]) if s.error_codes else "无故障",
         attrs_fn=_error_attrs,
     ),
     NarwalSensorDescription(
