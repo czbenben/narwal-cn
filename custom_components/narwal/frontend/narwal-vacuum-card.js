@@ -1,4 +1,4 @@
-const CARD_VERSION = "2.0.0";
+const CARD_VERSION = "2.0.1";
 
 const MODES = [
   { label: "Vacuum & Mop", value: "Vacuum & Mop" },
@@ -316,7 +316,17 @@ class NarwalVacuumCard extends HTMLElement {
       );
     }
 
-    let status = attrs.status || entity.state || "--";
+    const statusObj = this._state(this._sibling("sensor", "status"));
+    let status;
+    if (statusObj && !["unknown", "unavailable"].includes(statusObj.state)) {
+      try {
+        status = this._hass.formatEntityState ? this._hass.formatEntityState(statusObj) : statusObj.state;
+      } catch {
+        status = statusObj.state;
+      }
+    } else {
+      status = attrs.status || entity.state || "--";
+    }
     if (attrs.current_room && entity.state === "cleaning") status += ` · ${attrs.current_room}`;
     root.querySelector(".status").textContent = status;
 
@@ -341,7 +351,7 @@ class NarwalVacuumCard extends HTMLElement {
     const root = this.shadowRoot;
     const err = this._state(this._sibling("sensor", "error"));
     const errBanner = root.querySelector(".banner.error");
-    const hasError = err && !["No error", "unknown", "unavailable"].includes(err.state);
+    const hasError = err && !["No error", "无故障", "unknown", "unavailable"].includes(err.state);
     errBanner.classList.toggle("show", !!hasError);
     if (hasError) errBanner.querySelector(".text").textContent = err.state;
 
