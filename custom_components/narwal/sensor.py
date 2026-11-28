@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from homeassistant.components.sensor import (
+    RestoreSensor,
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
@@ -65,6 +66,8 @@ class NarwalSensorDescription(SensorEntityDescription):
     exists_fn: Callable[[NarwalState], bool] = lambda _: True
     # Robot feature flag required for this entity (None = always create).
     feature: str | None = None
+    # Keep the last non-zero reading when the task ends or across HA restarts.
+    persist_last: bool = False
 
 
 def _base_enum(
@@ -104,6 +107,19 @@ def _consumable_attrs(state: NarwalState) -> dict[str, Any]:
     return {"items": sorted({CONSUMABLE_NAMES.get(i, i) for i in items}), "raw": items}
 
 
+def _progress_value(state: NarwalState) -> float | None:
+    val = state.progress
+    if state.is_cleaning:
+        return val
+    if val is not None and val > 0:
+        return val
+    if _slug(state.base.get("terminateReason"), "TASK_RESULT_") == "normal_end" and (
+        (state.cleaned_area or 0) > 0 or (state.elapsed_time or 0) > 0
+    ):
+        return 100.0
+    return None
+
+
 SENSORS: tuple[NarwalSensorDescription, ...] = (
     NarwalSensorDescription(
         key="battery",
@@ -141,6 +157,7 @@ SENSORS: tuple[NarwalSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfTime.SECONDS,
         suggested_unit_of_measurement=UnitOfTime.MINUTES,
         value_fn=lambda s: s.elapsed_time,
+        persist_last=True,
     ),
     NarwalSensorDescription(
         key="remaining_time",
@@ -156,13 +173,15 @@ SENSORS: tuple[NarwalSensorDescription, ...] = (
         device_class=SensorDeviceClass.AREA,
         native_unit_of_measurement=UnitOfArea.SQUARE_METERS,
         value_fn=lambda s: s.cleaned_area,
+        persist_last=True,
     ),
     NarwalSensorDescription(
         key="progress",
         translation_key="progress",
         icon="mdi:progress-check",
         native_unit_of_measurement=PERCENTAGE,
-        value_fn=lambda s: s.progress if s.is_cleaning else None,
+        value_fn=_progress_value,
+        persist_last=True,
     ),
     NarwalSensorDescription(
         key="current_room",
@@ -214,7 +233,7 @@ async def async_setup_entry(
     async_add_entities(entities)
 
 
-class NarwalSensor(NarwalEntity, SensorEntity):
+class NarwalSensor(NarwalEntity, RestoreSensor):
     """A sensor computed from the vacuum state."""
 
     entity_description: NarwalSensorDescription
@@ -222,10 +241,53 @@ class NarwalSensor(NarwalEntity, SensorEntity):
     def __init__(self, coordinator: NarwalCoordinator, description: NarwalSensorDescription) -> None:
         super().__init__(coordinator, description.key)
         self.entity_description = description
+        self._last_value: Any = None
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if (
+            self.entity_description.persist_last
+            and self.entity_description.value_fn(self.state_data) is None
+        ):
+            last = await self.async_get_last_sensor_data()
+            if (
+                last is not None
+                and last.native_value is not None
+                and last.native_unit_of_measurement in (None, self.native_unit_of_measurement)
+            ):
+                try:
+                    num = float(last.native_value)
+                except (TypeError, ValueError):
+                    num = None
+                if num is not None and num > 0:
+                    self._last_value = (
+                        int(round(num))
+                        if self.native_unit_of_measurement == UnitOfTime.SECONDS
+                        else round(num, 1)
+                    )
 
     @property
     def native_value(self) -> Any:
-        return self.entity_description.value_fn(self.state_data)
+        val = self.entity_description.value_fn(self.state_data)
+        if self.entity_description.persist_last:
+            if self.state_data.is_cleaning and val is not None:
+                self._last_value = val
+                return val
+            if (
+                self.entity_description.key == "progress"
+                and not self.state_data.is_cleaning
+                and _slug(self.state_data.base.get("terminateReason"), "TASK_RESULT_") == "normal_end"
+                and (val is None or val <= 0)
+                and self._last_value is not None
+            ):
+                self._last_value = 100.0
+                return 100.0
+            if val is not None and val > 0:
+                self._last_value = val
+                return val
+            if self._last_value is not None:
+                return self._last_value
+        return val
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:

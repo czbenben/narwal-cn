@@ -271,13 +271,91 @@ class NarwalState:
     preferred_fan_level: FanLevel | None = None
     preferred_mop_humidity: MopHumidity | None = None
     last_base_update: float = 0.0
+    _latched_clean_water_error: int | None = None
+    _latched_clean_water_task: str = ""
+    _latched_clean_water_saw_pause: bool = False
+    _latched_clean_water_ts: float = 0.0
+    _latched_sewage_error: int | None = None
+    _latched_sewage_task: str = ""
+    _latched_sewage_saw_pause: bool = False
+    _latched_sewage_ts: float = 0.0
 
     # ---- update paths -------------------------------------------------
 
+    @staticmethod
+    def _next_tank_latch(
+        raw_codes: list[int],
+        error_map: dict[int, str],
+        cur_err: int | None,
+        cur_task: str,
+        saw_pause: bool,
+        cur_ts: float,
+        task_name: str,
+        raw_paused_or_error: bool,
+        now: float,
+    ) -> tuple[int | None, str, bool, float]:
+        live_code = next((c for c in raw_codes if c in error_map), None)
+        if live_code is not None:
+            return live_code, task_name, raw_paused_or_error, now
+        if cur_err is None:
+            return None, "", False, 0.0
+        if raw_paused_or_error:
+            return cur_err, cur_task, True, cur_ts
+        if not saw_pause and (now - cur_ts) <= 15.0 and task_name == cur_task:
+            return cur_err, cur_task, False, cur_ts
+        return None, "", False, 0.0
+
+    def _update_tank_latches(self, now: float) -> None:
+        raw_codes = self.reported_error_codes
+        live_shown_errors = [c for c in raw_codes if c in ERROR_MESSAGES]
+        raw_paused = bool(
+            self.task_status.get("pauseStatus")
+            or self.sub_status.endswith("_WAITING_COMMAND")
+            or self.task == "TASK_TYPE_WAITING_COMMAND"
+        )
+        raw_error = bool(
+            live_shown_errors and self.task in ("TASK_TYPE_IDLE", "TASK_TYPE_UNSPECIFIED")
+        )
+        paused_or_err = raw_paused or raw_error
+        (
+            self._latched_clean_water_error,
+            self._latched_clean_water_task,
+            self._latched_clean_water_saw_pause,
+            self._latched_clean_water_ts,
+        ) = self._next_tank_latch(
+            raw_codes,
+            _CLEAN_WATER_TANK_BY_ERROR,
+            self._latched_clean_water_error,
+            self._latched_clean_water_task,
+            self._latched_clean_water_saw_pause,
+            self._latched_clean_water_ts,
+            self.task,
+            paused_or_err,
+            now,
+        )
+        (
+            self._latched_sewage_error,
+            self._latched_sewage_task,
+            self._latched_sewage_saw_pause,
+            self._latched_sewage_ts,
+        ) = self._next_tank_latch(
+            raw_codes,
+            _SEWAGE_TANK_BY_ERROR,
+            self._latched_sewage_error,
+            self._latched_sewage_task,
+            self._latched_sewage_saw_pause,
+            self._latched_sewage_ts,
+            self.task,
+            paused_or_err,
+            now,
+        )
+
     def update_base_status(self, base: dict[str, Any]) -> None:
         prev = self.activity
+        now = time.time()
         self.base = base
-        self.last_base_update = time.time()
+        self.last_base_update = now
+        self._update_tank_latches(now)
         if self.activity != prev:
             _LOGGER.info(
                 "Narwal activity %s -> %s (task=%s, sub=%s)",
@@ -374,7 +452,11 @@ class NarwalState:
         1, mid-clean with everything normal) that the app has no message for
         and doesn't display; those must not raise errors in HA.
         """
-        return [c for c in self.reported_error_codes if c in ERROR_MESSAGES]
+        codes = [c for c in self.reported_error_codes if c in ERROR_MESSAGES]
+        for latched in (self._latched_clean_water_error, self._latched_sewage_error):
+            if latched is not None and latched in ERROR_MESSAGES and latched not in codes:
+                codes.append(latched)
+        return codes
 
     @property
     def hidden_error_codes(self) -> list[int]:
@@ -385,6 +467,8 @@ class NarwalState:
         for code in self.reported_error_codes:
             if code in _CLEAN_WATER_TANK_BY_ERROR:
                 return _CLEAN_WATER_TANK_BY_ERROR[code]
+        if self._latched_clean_water_error is not None:
+            return _CLEAN_WATER_TANK_BY_ERROR[self._latched_clean_water_error]
         value = self.base.get("cleanWaterTankState")
         return value if isinstance(value, str) else None
 
@@ -393,6 +477,8 @@ class NarwalState:
         for code in self.reported_error_codes:
             if code in _SEWAGE_TANK_BY_ERROR:
                 return _SEWAGE_TANK_BY_ERROR[code]
+        if self._latched_sewage_error is not None:
+            return _SEWAGE_TANK_BY_ERROR[self._latched_sewage_error]
         value = self.base.get("sewageTankState")
         return value if isinstance(value, str) else None
 

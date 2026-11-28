@@ -264,24 +264,123 @@ def decrypt_extradata(ex: bytes, key: bytes, iv: bytes) -> bytes:
     return d.update(ex[: len(ex) // 16 * 16])
 
 
+_VALID_HEVC_NAL_TYPES = frozenset((0, 1, 16, 17, 18, 19, 20, 21, 32, 33, 34, 35, 39, 40))
+
+
+def _is_valid_hevc_nal(nal: bytes) -> bool:
+    """Strict HEVC NAL header check (layer 0, temporal_id_plus1 == 1)."""
+    if len(nal) < 2:
+        return False
+    if (nal[0] & 0x81) != 0:
+        return False
+    if nal[1] != 0x01:
+        return False
+    nal_type = (nal[0] >> 1) & 0x3F
+    if nal_type not in _VALID_HEVC_NAL_TYPES:
+        return False
+    if nal_type in (32, 33, 34) and len(nal) > 256:
+        return False
+    return True
+
+
+def _has_bad_rbsp(nal: bytes) -> bool:
+    """True if HEVC NAL body contains forbidden 3-byte start-code/emulation sequences."""
+    return (b"\x00\x00\x00" in nal) or (b"\x00\x00\x01" in nal) or (b"\x00\x00\x02" in nal)
+
+
+def _extract_valid_nals(pt: bytes) -> list[bytes]:
+    """Parse one or more [4B len][HEVC NAL] units from decrypted tag plaintext."""
+    units: list[bytes] = []
+    pos = 0
+    total = len(pt)
+    while pos + 4 <= total:
+        ln = struct.unpack_from(">I", pt, pos)[0]
+        if ln == 0 or pos + 4 + ln > total:
+            break
+        nal = pt[pos + 4 : pos + 4 + ln]
+        if not _is_valid_hevc_nal(nal):
+            break
+        units.append(pt[pos : pos + 4 + ln])
+        pos += 4 + ln
+    return units
+
+
 def open_video_stream(relay_url: str):
-    """av.open the RTMP relay -> (container, video_stream)."""
+    """av.open the RTMP relay with low-latency probe limits -> (container, video_stream)."""
     import av
-    cont = av.open(relay_url, timeout=10, options={"rtmp_live": "1"})
+    cont = av.open(
+        relay_url,
+        timeout=10,
+        options={
+            "rtmp_live": "1",
+            "fflags": "nobuffer",
+            "flags": "low_delay",
+            "probesize": "65536",
+            "analyzeduration": "1000000",
+        },
+    )
     vs = next(s for s in cont.streams if s.type == "video")
     return cont, vs
 
 
-def iter_nal_payloads(cont, vs, key: bytes, iv: bytes):
-    """Yield (length-prefixed NAL payload, pts, dts) for each good video tag."""
+def iter_nal_payloads(cont, vs, key: bytes, iv: bytes, diag: dict | None = None):
+    """Yield (length-prefixed NAL payload, pts, dts) for each validated HEVC NAL."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+
+    def _aes(data: bytes) -> bytes:
+        d = cipher.decryptor()
+        return d.update(data) + d.finalize()
+
+    def _clean(cand: bytes) -> list[bytes]:
+        return _extract_valid_nals(cand)
+
     for pkt in cont.demux(vs):
-        pt = decrypt_packet(bytes(pkt), key, iv)
-        if len(pt) < 4:
+        raw = bytes(pkt)
+        if len(raw) < 4:
             continue
-        ln = struct.unpack(">I", pt[:4])[0]
-        if ln == 0 or 4 + ln > len(pt):
+
+        # 1. Check cleartext FIRST so unencrypted packets with len%16 >= 6 are never scrambled by AES
+        units = _clean(raw)
+        mode = "clear"
+
+        hl = len(raw) % 16
+        pt = b""
+        if not units:
+            pt = raw[:hl] + _aes(raw[hl:])
+            units = _clean(pt)
+            mode = "lead"
+        if not units and hl != 0 and len(raw) >= 16:
+            n16 = (len(raw) // 16) * 16
+            units = _clean(_aes(raw[:n16]) + raw[n16:])
+            mode = "tail"
+        if not units and len(raw) >= 20:
+            ln = struct.unpack_from(">I", raw, 0)[0]
+            if 0 < ln <= len(raw) - 4:
+                m16 = (ln // 16) * 16
+                if m16 >= 16:
+                    cand = raw[:4] + _aes(raw[4 : 4 + m16]) + raw[4 + m16 :]
+                    units = _clean(cand)
+                    mode = "len4_tail"
+
+        if not units:
+            if diag is not None:
+                diag["dropped"] = diag.get("dropped", 0) + 1
+                samples = diag.setdefault("sample_dropped", [])
+                if len(samples) < 5:
+                    samples.append({
+                        "len": len(raw),
+                        "mod16": len(raw) % 16,
+                        "raw20": raw[:20].hex(),
+                        "lead20": pt[:20].hex(),
+                    })
             continue
-        yield pt[: 4 + ln], pkt.pts, pkt.dts
+        if diag is not None:
+            hits = diag.setdefault("hits", {})
+            hits[mode] = hits.get(mode, 0) + 1
+        for unit in units:
+            yield unit, pkt.pts, pkt.dts
 
 
 def grab_first_frame_jpeg(session: LinkVisualSession, max_packets: int = 60,

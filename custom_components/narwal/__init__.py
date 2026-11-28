@@ -38,6 +38,11 @@ CARD_JS_PATH = Path(__file__).parent / "frontend" / "narwal-vacuum-card.js"
 async def async_setup_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bool:
     """Set up Narwal from a config entry."""
     await _register_card(hass)
+    if not hass.data.get("narwal_ts_view_registered"):
+        from .camera import NarwalLiveStatsView, NarwalLiveTsView
+        hass.http.register_view(NarwalLiveTsView())
+        hass.http.register_view(NarwalLiveStatsView())
+        hass.data["narwal_ts_view_registered"] = True
 
     coordinator = NarwalCoordinator(hass, entry)
     try:
